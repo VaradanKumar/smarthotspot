@@ -2,6 +2,9 @@
 
 SmartHotspot is a professional-grade utility that allows your Windows laptop to remotely trigger and connect to your phone's mobile hotspot seamlessly, similar to the Apple ecosystem experience. It uses a **Hybrid Bluetooth Protocol** for instant discovery and reliable control without requiring root, Shizuku, or any specialized system modifications.
 
+> [!CAUTION]
+> **Samsung Device Exclusive**: This project currently requires a **Samsung Galaxy** smartphone with **Modes and Routines** enabled. It uses the system's routine engine as a secure bridge to toggle the hotspot.
+
 ## 🚀 Key Features
 
 - **Hybrid Discovery**: Uses Bluetooth Low Energy (BLE) beacons for near-instant discovery (< 2s).
@@ -19,12 +22,27 @@ SmartHotspot is a professional-grade utility that allows your Windows laptop to 
 
 ## 📦 Setup Instructions
 
-### 1. Android Phone (S22+ / Android 16+)
-- Install the app and grant all permissions (Notification, Bluetooth, Nearby Devices).
+### 1. Android Phone (Samsung Only)
+- Install the app and grant all permissions (**Notification**, **Bluetooth**, **Nearby Devices**).
 - **IMPORTANT**: Set Battery usage to **"Unrestricted"** in App Info to prevent the OS from killing the background service.
-- Create a Samsung Routine:
-    - **IF**: Notification received (App: SmartHotspot, Keyword: `HOTSPOT_ON`)
-    - **THEN**: Mobile Hotspot -> ON
+
+#### 🔧 Create Samsung Routines (2 Required)
+
+You must create exactly two routines in **Settings > Modes and Routines > Routines**:
+
+**Routine 1: Hotspot ON**
+- **IF**: `Notification received`
+    - **App**: `SmartHotspot`
+    - **Keyword**: `HOTSPOT_ON`
+- **THEN**: `Mobile Hotspot` -> `On`
+
+**Routine 2: Hotspot OFF**
+- **IF**: `Notification received`
+    - **App**: `SmartHotspot`
+    - **Keyword**: `HOTSPOT_OFF`
+- **THEN**: `Mobile Hotspot` -> `Off`
+
+---
 
 ### 2. Windows Laptop
 - Install Python 3.9+.
