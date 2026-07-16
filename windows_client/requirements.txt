@@ -1,0 +1,3 @@
+# No required packages for Python 3.13 on Windows.
+# The client uses Python's built-in Bluetooth socket support.
+# Optional on older Python versions: pybluez
