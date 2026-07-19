@@ -1,0 +1,5 @@
+- [x] Research current project state and git tags
+- [x] Stash uncommitted changes (v6.0 work)
+- [x] Fetch updates from remote
+- [x] Checkout tag `v4.5`
+- [x] Verify files at `v4.5`

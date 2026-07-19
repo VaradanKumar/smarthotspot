@@ -146,3 +146,7 @@ class BluetoothEngine:
         if self.socket:
             try: self.socket.close()
             finally: self.socket = None
+
+    @property
+    def is_connected(self):
+        return self.socket is not None
