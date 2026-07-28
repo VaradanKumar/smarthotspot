@@ -35,8 +35,6 @@ object BluetoothServer {
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var logCallback: ((String) -> Unit)? = null
     private var messageReceivedCallback: ((String) -> Unit)? = null
-    
-    var securityPin: String = "1758"
 
     private fun log(message: String) {
         logCallback?.invoke(message)
@@ -97,17 +95,10 @@ object BluetoothServer {
             }
 
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                val rawMessage = value!!.toString(Charsets.UTF_8).trim()
-                val parts = rawMessage.split(":", limit = 2)
-                
+                val message = value!!.toString(Charsets.UTF_8).trim().uppercase()
                 mainHandler.post {
-                    if (parts.size == 2 && parts[0] == securityPin) {
-                        val command = parts[1].uppercase()
-                        log("Security: PIN Verified. Command: $command")
-                        messageReceivedCallback?.invoke(command)
-                    } else {
-                        log("Security ALERT: Invalid PIN from client!")
-                    }
+                    log("BLE command received: $message")
+                    messageReceivedCallback?.invoke(message)
                 }
             }
 

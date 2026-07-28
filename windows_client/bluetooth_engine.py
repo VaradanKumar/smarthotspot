@@ -10,7 +10,6 @@ from bleak import BleakClient, BleakScanner
 # SHARED CONFIGURATION (v6.0 - Nordic Standard BLE)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
-SECURITY_PIN = "1758" # Default PIN
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
 
@@ -110,11 +109,9 @@ class BluetoothEngine:
         if not self.client or not self.client.is_connected:
             await self._find_and_connect_async()
             
-        # Secure Pushing with PIN
-        secure_payload = f"{SECURITY_PIN}:{cmd}"
-        self.log(f"Pushing Secure Command...")
+        self.log(f"Pushing command...")
         try:
-            await self.client.write_gatt_char(COMMAND_CHAR_UUID, secure_payload.encode("utf-8"))
+            await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"))
             self.log("Success!")
         except Exception as e:
             if retry:
