@@ -7,32 +7,36 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.Binder
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 
 class BluetoothHotspotService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 1
-        private const val TAG = "HotspotService"
+        const val ACTION_LOG_UPDATE = "com.varadan.hotspot.ACTION_LOG_UPDATE"
+        const val EXTRA_LOG_MESSAGE = "com.varadan.hotspot.EXTRA_LOG_MESSAGE"
+        const val ACTION_STOP_SERVICE = "com.varadan.hotspot.ACTION_STOP_SERVICE"
     }
 
-    private var wakeLock: PowerManager.WakeLock? = null
+    private val binder = LocalBinder()
+
+    inner class LocalBinder : Binder() {
+        fun getService(): BluetoothHotspotService = this@BluetoothHotspotService
+    }
 
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
                 when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
                     BluetoothAdapter.STATE_ON -> {
-                        Log.d(TAG, "Bluetooth turned ON, restarting server")
-                        LogManager.addLog("BT ON: Restarting Server")
+                        broadcastUpdate("Bluetooth ON detected")
                         ensureServerRunning()
                     }
                     BluetoothAdapter.STATE_OFF -> {
-                        Log.d(TAG, "Bluetooth turned OFF, stopping server")
-                        LogManager.addLog("BT OFF: Server Paused")
+                        broadcastUpdate("Bluetooth OFF detected")
                         BluetoothServer.stopServer()
                     }
                 }
@@ -42,89 +46,81 @@ class BluetoothHotspotService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        
-        // Acquire WakeLock to keep radio active
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SmartHotspot::RadioLock").apply {
-            acquire()
-        }
-
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-        registerReceiver(bluetoothStateReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(bluetoothStateReceiver, filter, RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(bluetoothStateReceiver, filter)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Service onStartCommand")
-        
-        // Ensure channels are created (important for boot start)
+        if (intent?.action == ACTION_STOP_SERVICE) {
+            broadcastUpdate("Manual shutdown requested")
+            BluetoothServer.stopServer()
+            stopForeground(true)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         NotificationHelper.createChannel(this)
-        
-        // Start as foreground service
         val notification = NotificationHelper.getServiceNotification(this)
+        
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            broadcastUpdate("Foreground Service Active")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start foreground service: ${e.message}")
+            broadcastUpdate("FGS Error: ${e.message}")
+            stopSelf()
         }
 
         ensureServerRunning()
-
         return START_STICKY
     }
 
-    private fun ensureServerRunning() {
-        // Ensure Bluetooth Server is running
+    fun ensureServerRunning() {
         if (!BluetoothServer.isServerRunning()) {
-            if (BluetoothManager.hasBluetoothPermission(this) && BluetoothManager.isBluetoothEnabled(this)) {
-                BluetoothServer.startServer(this) { message ->
-                    handleRemoteCommand(message)
-                }
-            } else {
-                Log.w(TAG, "Bluetooth not ready for server")
+            BluetoothServer.startServer(this, { logMsg -> broadcastUpdate(logMsg) }) { message ->
+                handleRemoteCommand(message)
             }
         }
     }
 
     private fun handleRemoteCommand(message: String) {
-        val cleanMessage = message.trim().uppercase()
-        Log.i(TAG, "Command received from laptop: $cleanMessage")
+        val cmd = message.trim().uppercase()
+        broadcastUpdate("Command: $cmd")
         
-        // Show a popup so the user knows the signal arrived
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        handler.post {
-            android.widget.Toast.makeText(this, "Remote Signal: $cleanMessage", android.widget.Toast.LENGTH_SHORT).show()
-        }
-
         when {
-            cleanMessage.contains("HOTSPOT_ON") -> {
-                Log.i(TAG, "Triggering HOTSPOT_ON notification")
-                NotificationHelper.sendHotspotOn(this)
-            }
-            cleanMessage.contains("HOTSPOT_OFF") -> {
-                Log.i(TAG, "Triggering HOTSPOT_OFF notification")
-                NotificationHelper.sendHotspotOff(this)
-            }
-            else -> {
-                Log.w(TAG, "Unknown command string: $cleanMessage")
-            }
+            cmd.contains("HOTSPOT_ON") -> NotificationHelper.sendHotspotOn(this)
+            cmd.contains("HOTSPOT_OFF") -> NotificationHelper.sendHotspotOff(this)
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    fun broadcastUpdate(message: String) {
+        val intent = Intent(ACTION_LOG_UPDATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_LOG_MESSAGE, message)
+        }
+        sendBroadcast(intent)
+        // Also keep writing to the old LogManager for now so the UI doesn't break
+        LogManager.addLog(message)
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        return super.onUnbind(intent)
+    }
 
     override fun onDestroy() {
-        Log.d(TAG, "Service onDestroy")
-        unregisterReceiver(bluetoothStateReceiver)
-        
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
-        wakeLock = null
-
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (_: Exception) {}
         BluetoothServer.stopServer()
         super.onDestroy()
     }

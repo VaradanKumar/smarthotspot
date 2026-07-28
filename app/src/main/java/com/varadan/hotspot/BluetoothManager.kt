@@ -2,7 +2,7 @@ package com.varadan.hotspot
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothManager as AndroidBluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -11,7 +11,7 @@ import androidx.core.content.ContextCompat
 object BluetoothManager {
 
     private fun getAdapter(context: Context): BluetoothAdapter? {
-        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as AndroidBluetoothManager
         return bluetoothManager.adapter
     }
 

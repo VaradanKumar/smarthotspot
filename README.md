@@ -1,14 +1,13 @@
 # SmartHotspot - "Instant Hotspot" for Android & Windows
 
-SmartHotspot is a professional-grade utility that allows your Windows laptop to remotely trigger and connect to your phone's mobile hotspot seamlessly, similar to the Apple ecosystem experience. It uses a **Hybrid Bluetooth Protocol** for instant discovery and reliable control without requiring root, Shizuku, or any specialized system modifications.
+SmartHotspot is a utility that allows your Windows laptop to trigger your phone's mobile hotspot using Bluetooth Low Energy (BLE), without requiring root, Shizuku, or specialized system modifications.
 
 > [!CAUTION]
 > **Samsung Device Exclusive**: This project currently requires a **Samsung Galaxy** smartphone with **Modes and Routines** enabled. It uses the system's routine engine as a secure bridge to toggle the hotspot.
 
 ## 🚀 Key Features
 
-- **Hybrid Discovery**: Uses Bluetooth Low Energy (BLE) beacons for near-instant discovery (< 2s).
-- **Secure Control**: Uses Bluetooth Classic (RFCOMM) with a custom handshake for reliable command delivery.
+- **BLE Discovery and Control**: Uses a BLE GATT service for device discovery and command delivery.
 - **WhatsApp-style Automation**: Background service starts automatically on boot and recovers if Bluetooth is toggled.
 - **Samsung Optimization**: Specifically designed for Samsung Galaxy S-series (Android 16 / One UI 8) with deep system stability fixes.
 - **Invisible Windows Agent**: Lives in the Windows System Tray for one-click access. No messy console windows.
@@ -16,8 +15,8 @@ SmartHotspot is a professional-grade utility that allows your Windows laptop to 
 
 ## 🛠 How it Works
 
-1.  **The Android App**: Runs a 24/7 background service that broadcasts a tiny BLE beacon containing the app's current "Door Number" (Port).
-2.  **The Windows Agent**: "Hears" the beacon, connects to the phone via Bluetooth Classic, and sends a secure `HOTSPOT_ON` command.
+1.  **The Android App**: Runs a background service that advertises a BLE GATT command service.
+2.  **The Windows Agent**: Scans for that service, connects with BLE, and writes a `HOTSPOT_ON` or `HOTSPOT_OFF` command.
 3.  **The Magic Bridge**: The Android app posts a notification with a specific keyword. **Samsung Modes & Routines** detects this keyword and toggles the system hotspot.
 
 ## 📦 Setup Instructions

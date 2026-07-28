@@ -1,152 +1,135 @@
-import re
-import socket
-import subprocess
-import threading
+import asyncio
 import json
 import os
+import re
+import subprocess
+import threading
 import time
-import asyncio
+from bleak import BleakClient, BleakScanner
 
-# SHARED CONFIGURATION (Ultimate Stability v4.5)
+# SHARED CONFIGURATION (v6.0 - Nordic Standard BLE)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
-# STRICT BLACKLIST: Ports 1, 2, 3 are NEVER scanned
-SAFE_SCAN_PORTS = [7, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15] + list(range(16, 31))
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
+COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
 
-def normalize_mac(addr):
-    digits = re.sub(r"[^0-9A-Fa-f]", "", addr or "")
-    if len(digits) != 12: return ""
-    return ":".join(digits.upper()[i:i+2] for i in range(0, 12, 2))
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, 'r') as f: return json.load(f)
         except: pass
-    return {"mac": "", "last_port": None}
+    return {"mac": ""}
 
-def save_config(mac=None, port=None):
+def save_config(mac=None):
     cfg = load_config()
     if mac: cfg["mac"] = mac
-    if port: cfg["last_port"] = port
     try:
         with open(CONFIG_PATH, 'w') as f: json.dump(cfg, f)
     except: pass
 
-def get_paired_devices():
-    cmd = "Get-PnpDevice -Class Bluetooth | Where-Object { $_.InstanceId -match 'DEV_([0-9A-F]{12})' } | ForEach-Object { $a = ($Matches[1] -replace '(.{2})(?!$)', '$1:'); \"$($_.FriendlyName)|$a\" }"
-    try:
-        res = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], capture_output=True, text=True, timeout=10)
-        devices = []
-        seen = set()
-        for line in res.stdout.splitlines():
-            if "|" not in line: continue
-            name, addr = line.rsplit("|", 1)
-            addr = normalize_mac(addr)
-            if addr and addr not in seen:
-                seen.add(addr)
-                devices.append({"name": name.strip(), "address": addr})
-        return sorted(devices, key=lambda x: x["name"].lower())
-    except: return []
-
 class BluetoothEngine:
     def __init__(self, log_callback):
-        self.socket = None
+        self.client = None
         self.log_callback = log_callback
-        self.config = load_config()
+        self.loop = asyncio.new_event_loop()
+        self._start_loop()
+
+    def _start_loop(self):
+        def run_loop():
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_forever()
+        threading.Thread(target=run_loop, daemon=True).start()
 
     def log(self, msg): self.log_callback(msg)
 
-    def connect(self, address, retries=3):
-        for attempt in range(1, retries + 1):
-            try:
-                if attempt > 1: self.log(f"Retry attempt {attempt}/{retries}...")
-                if self._internal_connect(address):
-                    return True
-            except Exception as e:
-                if attempt == retries: raise e
-                self.log(f"Attempt {attempt} failed, retrying in 1s...")
-                time.sleep(1)
-        return False
+    async def _find_and_connect_async(self):
+        # 1. Quick Link (Cached)
+        cfg = load_config()
+        cached_mac = cfg.get("mac")
+        device = None
 
-    def _internal_connect(self, address):
-        if self.socket: self.disconnect()
-        addr = normalize_mac(address)
-        if not addr: raise Exception("Invalid MAC Address")
-        save_config(mac=addr)
+        if cached_mac:
+            self.log(f"Quick Link: {cached_mac}")
+            device = await BleakScanner.find_device_by_address(cached_mac, timeout=2.0)
+        
+        # 2. Burst Scan (Aggressive)
+        if not device:
+            self.log("Searching air (Burst Scan)...")
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, ad: SERVICE_UUID.lower() in [u.lower() for u in ad.service_uuids],
+                timeout=4.0
+            )
+        
+        if not device:
+            raise Exception("Phone not found. Ensure app engine is ON.")
+            
+        self.log(f"Linked: {device.name or 'SmartHotspot'}")
+        self.client = BleakClient(device)
+        await self.client.connect()
+        
+        # --- NEW: Reliability Delay & Multi-pass Verification ---
+        self.log("Verifying Command Center...")
+        await asyncio.sleep(1.0) # Let Windows GATT settle
+        
+        found = False
+        # Try up to 3 times to find the service (handles slow discovery)
+        for attempt in range(3):
+            for service in self.client.services:
+                for char in service.characteristics:
+                    if char.uuid.lower() == COMMAND_CHAR_UUID.lower():
+                        found = True
+                        break
+                if found: break
+            if found: break
+            if attempt < 2:
+                self.log(f"Retrying discovery (Attempt {attempt+2})...")
+                await asyncio.sleep(1.0)
 
-        # 1. Try Cached Port (Instant Success)
-        last_port = load_config().get("last_port")
-        if last_port:
-            self.log(f"Trying last port: {last_port}...")
-            if self._attempt_handshake(addr, last_port): return True
+        if not found:
+            # Debug: Log what WAS found to help the user
+            self.log("Verification failed. Windows Cache issue likely.")
+            self.log("Tip: Toggle Bluetooth on Phone & Laptop.")
+            raise Exception("Command ID not found. Please toggle Bluetooth.")
 
-        # 2. Try BLE discovery (Modern Bleak logic)
+        self.log("System Active.")
+        save_config(mac=device.address)
+
+    def connect(self):
+        future = asyncio.run_coroutine_threadsafe(self._find_and_connect_async(), self.loop)
+        return future.result()
+
+    async def _send_command_async(self, cmd, retry=True):
+        if not self.client or not self.client.is_connected:
+            await self._find_and_connect_async()
+            
+        self.log(f"Pushing: {cmd}")
         try:
-            import bleak
-            self.log("Listening for phone beacon (8s)...")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            port = loop.run_until_complete(self._discover_ble(addr))
-            loop.close()
-            if port and port not in [1, 2, 3]:
-                self.log(f"Beacon found port {port}")
-                if self._attempt_handshake(addr, port):
-                    save_config(port=port)
-                    return True
-        except: pass
-
-        # 3. Turbo Scan (Safe range)
-        self.log("Starting Turbo Scan...")
-        for port in SAFE_SCAN_PORTS:
-            if port == last_port: continue
-            if self._attempt_handshake(addr, port, timeout=0.8):
-                save_config(port=port)
-                return True
-        return False
-
-    async def _discover_ble(self, target):
-        import bleak
-        devices = await bleak.BleakScanner.discover(timeout=8.0, return_adv=True)
-        for addr, (dev, adv) in devices.items():
-            if addr.upper() == target.upper():
-                m_data = adv.manufacturer_data
-                if 0xFFFF in m_data: return int(m_data[0xFFFF][0])
-        return None
-
-    def _attempt_handshake(self, host, port, timeout=3.0):
-        try:
-            sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-            sock.settimeout(timeout)
-            sock.connect((host, port))
-            sock.send("HELO\n".encode("utf-8"))
-            res = sock.recv(1024).decode("utf-8")
-            if "READY" in res:
-                sock.settimeout(None)
-                self.socket = sock
-                self.log(f"Verified on port {port}")
-                return True
-            sock.close()
-        except: pass
-        return False
+            await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"))
+            self.log("Success!")
+        except Exception as e:
+            if retry:
+                self.log("Auto-recovering link...")
+                await self.disconnect_async()
+                await asyncio.sleep(0.5)
+                await self._send_command_async(cmd, retry=False)
+            else:
+                self.log(f"Fail: {str(e)}")
+                raise e
 
     def send_command(self, cmd):
-        if not self.socket: raise Exception("Not connected")
-        try:
-            for _ in range(3): # Extra burst
-                self.socket.send(f"{cmd}\n".encode("utf-8"))
-                time.sleep(0.1)
-            self.log(f"Sent: {cmd}")
-            return True
-        except:
-            self.socket = None
-            raise Exception("Connection lost")
+        future = asyncio.run_coroutine_threadsafe(self._send_command_async(cmd), self.loop)
+        return future.result()
+
+    async def disconnect_async(self):
+        if self.client:
+            try: await self.client.disconnect()
+            except: pass
+            self.client = None
 
     def disconnect(self):
-        if self.socket:
-            try: self.socket.close()
-            finally: self.socket = None
+        asyncio.run_coroutine_threadsafe(self.disconnect_async(), self.loop)
+        self.log("Offline.")
 
     @property
     def is_connected(self):
-        return self.socket is not None
+        return self.client is not None and self.client.is_connected

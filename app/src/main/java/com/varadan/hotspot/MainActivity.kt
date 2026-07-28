@@ -2,25 +2,23 @@ package com.varadan.hotspot
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.content.Intent
+import android.bluetooth.BluetoothManager
+import android.content.*
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.Divider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,107 +29,93 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.compose.ui.platform.LocalContext
 import com.varadan.hotspot.ui.theme.HotspotTheme
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
-    private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            val allGranted = permissions.entries.all { it.value }
-            if (allGranted) {
-                Toast.makeText(this, "All Permissions Granted", Toast.LENGTH_SHORT).show()
+    private var hotspotService: BluetoothHotspotService? = null
+    private var isBound = false
+
+    private val bluetoothManager by lazy { getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager }
+    private val bluetoothAdapter by lazy { bluetoothManager.adapter }
+
+    private val enableBluetoothLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                LogManager.addLog("Bluetooth enabled by user")
             } else {
-                Toast.makeText(this, "Some Permissions Denied", Toast.LENGTH_SHORT).show()
+                LogManager.addLog("Bluetooth enable request denied")
             }
         }
 
-    private val discoverableLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode != RESULT_CANCELED) {
-                Toast.makeText(this, "Device is now discoverable", Toast.LENGTH_SHORT).show()
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as BluetoothHotspotService.LocalBinder
+            hotspotService = binder.getService()
+            isBound = true
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            hotspotService = null
+            isBound = false
+        }
+    }
+
+    private val gattUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BluetoothHotspotService.ACTION_LOG_UPDATE) {
+                val message = intent.getStringExtra(BluetoothHotspotService.EXTRA_LOG_MESSAGE)
+                if (message != null) LogManager.addLog(message)
             }
         }
+    }
+
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            if (permissions.entries.all { it.value }) {
+                LogManager.addLog("Permissions granted")
+                tryToStartService()
+            } else {
+                Toast.makeText(this, "Permissions required", Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private fun requestEnableBluetooth() {
+        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+        enableBluetoothLauncher.launch(intent)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         NotificationHelper.createChannel(this)
-        checkAndRequestPermissions()
-        
-        // Auto-start the service as soon as the app is opened
-        val serviceIntent = Intent(this, BluetoothHotspotService::class.java)
-        try {
-            startForegroundService(serviceIntent)
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Auto-start failed: ${e.message}")
-        }
 
         setContent {
             HotspotTheme {
                 var isServerRunning by remember { mutableStateOf(BluetoothServer.isServerRunning()) }
-                var activePort by remember { mutableStateOf(BluetoothServer.activePort) }
+                var isBluetoothEnabled by remember { mutableStateOf(bluetoothAdapter?.isEnabled == true) }
                 
                 LaunchedEffect(Unit) {
                     while(true) {
                         isServerRunning = BluetoothServer.isServerRunning()
-                        activePort = BluetoothServer.activePort
-                        kotlinx.coroutines.delay(1000)
+                        isBluetoothEnabled = bluetoothAdapter?.isEnabled == true
+                        delay(1000)
                     }
                 }
-                var status by remember { 
-                    mutableStateOf(if (isServerRunning) "Server Running (Background)" else "Ready") 
-                }
-
-                val bluetoothSupported = BluetoothManager.isBluetoothSupported(this)
-                val bluetoothEnabled = BluetoothManager.isBluetoothEnabled(this)
-                val bluetoothName = BluetoothManager.getBluetoothName(this)
-                val bluetoothPermission = BluetoothManager.hasBluetoothPermission(this)
 
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     HomeScreen(
-                        status = status,
                         isServerRunning = isServerRunning,
-                        activePort = activePort,
-                        bluetoothSupported = bluetoothSupported,
-                        bluetoothEnabled = bluetoothEnabled,
-                        bluetoothPermission = bluetoothPermission,
-                        bluetoothName = bluetoothName,
-                        onHotspotOn = {
-                            NotificationHelper.sendHotspotOn(this)
-                            status = "HOTSPOT_ON Notification Sent"
-                        },
-                        onHotspotOff = {
-                            NotificationHelper.sendHotspotOff(this)
-                            status = "HOTSPOT_OFF Notification Sent"
-                        },
+                        isBluetoothEnabled = isBluetoothEnabled,
+                        onEnableBluetooth = { requestEnableBluetooth() },
                         onToggleServer = {
-                            val serviceIntent = Intent(this, BluetoothHotspotService::class.java)
-                            if (isServerRunning) {
-                                stopService(serviceIntent)
-                                isServerRunning = false
-                                status = "Server Stopped"
-                            } else if (!BluetoothManager.isBluetoothEnabled(this)) {
-                                status = "Turn Bluetooth ON first"
-                                Toast.makeText(this, "Turn Bluetooth ON first", Toast.LENGTH_SHORT).show()
+                            if (hasAllPermissions()) {
+                                tryToStartService()
                             } else {
-                                startForegroundService(serviceIntent)
-                                isServerRunning = true
-                                status = "Server Running (Background)"
-                            }
-                        },
-                        onMakeDiscoverable = {
-                            if (BluetoothManager.isBluetoothEnabled(this)) {
-                                val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
-                                    putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
-                                }
-                                discoverableLauncher.launch(intent)
-                            } else {
-                                status = "Turn Bluetooth ON first"
-                                Toast.makeText(this, "Turn Bluetooth ON first", Toast.LENGTH_SHORT).show()
+                                checkAndRequestPermissions()
                             }
                         }
                     )
@@ -140,165 +124,175 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkAndRequestPermissions() {
-        val permissionsToRequest = mutableListOf<String>()
-
+    override fun onStart() {
+        super.onStart()
+        val gattServiceIntent = Intent(this, BluetoothHotspotService::class.java)
+        bindService(gattServiceIntent, serviceConnection, BIND_AUTO_CREATE)
+        
+        val filter = IntentFilter(BluetoothHotspotService.ACTION_LOG_UPDATE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN)
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            }
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-
-        if (permissionsToRequest.isNotEmpty()) {
-            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+            registerReceiver(gattUpdateReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
-            // Already have all permissions, start service
-            startHotspotService()
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(gattUpdateReceiver, filter)
         }
     }
 
-    private fun startHotspotService() {
-        val serviceIntent = Intent(this, BluetoothHotspotService::class.java)
-        try {
-            startForegroundService(serviceIntent)
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Service start failed: ${e.message}")
+    override fun onStop() {
+        if (isBound) {
+            unbindService(serviceConnection)
+            isBound = false
         }
+        unregisterReceiver(gattUpdateReceiver)
+        super.onStop()
+    }
+
+    private fun tryToStartService() {
+        val intent = Intent(this, BluetoothHotspotService::class.java)
+        if (BluetoothServer.isServerRunning()) {
+            intent.action = BluetoothHotspotService.ACTION_STOP_SERVICE
+            startForegroundService(intent)
+        } else {
+            startForegroundService(intent)
+        }
+    }
+
+    private fun hasAllPermissions(): Boolean {
+        val list = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            list.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
+            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        return list.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+    }
+
+    private fun checkAndRequestPermissions() {
+        val list = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)
+                list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                list.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
+
+        if (list.isNotEmpty()) requestPermissionLauncher.launch(list.toTypedArray())
     }
 }
 
 @Composable
 fun HomeScreen(
-    status: String,
     isServerRunning: Boolean,
-    activePort: Int,
-    bluetoothSupported: Boolean,
-    bluetoothEnabled: Boolean,
-    bluetoothPermission: Boolean,
-    bluetoothName: String,
-    onHotspotOn: () -> Unit,
-    onHotspotOff: () -> Unit,
-    onToggleServer: () -> Unit,
-    onMakeDiscoverable: () -> Unit
+    isBluetoothEnabled: Boolean,
+    onEnableBluetooth: () -> Unit,
+    onToggleServer: () -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "Smart Hotspot", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(32.dp))
         
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .background(
-                        color = if (isServerRunning) Color.Green else Color.Red,
-                        shape = CircleShape
-                    )
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (isServerRunning) "Server Running" + (if (activePort != -1) " (Port $activePort)" else "") else "Server Stopped",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = if (isServerRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-            )
-        }
-        
-        Text(text = "Last Status: $status", fontSize = 14.sp, color = MaterialTheme.colorScheme.secondary)
-        
-        Spacer(modifier = Modifier.height(20.dp))
-        
-        Text("Bluetooth Supported: $bluetoothSupported")
-        Text("Bluetooth Enabled: $bluetoothEnabled")
-        Text("Bluetooth Permission: $bluetoothPermission")
-        Text("Phone Name: $bluetoothName")
-        
-        Spacer(modifier = Modifier.height(5.dp))
         Text(
-            text = "Tip: Find MAC address in Phone Settings > About > Status",
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.secondary
+            text = "Smart Hotspot",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
         )
+        
+        Spacer(modifier = Modifier.height(32.dp))
 
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Button(modifier = Modifier.fillMaxWidth(), onClick = onToggleServer) {
-            Text(if (isServerRunning) "Stop Bluetooth Server" else "Start Bluetooth Server")
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Button(modifier = Modifier.fillMaxWidth(), onClick = onMakeDiscoverable) {
-            Text("Make Device Discoverable")
-        }
-
-        Spacer(modifier = Modifier.height(30.dp))
-        Text("Manual Controls:", fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(modifier = Modifier.weight(1f), onClick = onHotspotOn) {
-                Text("Hotspot ON")
-            }
-            Button(modifier = Modifier.weight(1f), onClick = onHotspotOff) {
-                Text("Hotspot OFF")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        val context = LocalContext.current
-        Button(
+        Card(
             modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                NotificationHelper.sendHotspotOn(context)
-                Toast.makeText(context, "Testing Routine: Sending HOTSPOT_ON", Toast.LENGTH_SHORT).show()
-            },
-            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.secondary
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
-            Text("Step 1: Test Samsung Routine (Manual)")
+            Row(
+                modifier = Modifier.padding(20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .background(if (isServerRunning) Color.Green else Color.Red, CircleShape)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = if (isServerRunning) "Status: Running" else "Status: Stopped",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Button(
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            onClick = onToggleServer,
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isServerRunning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+        ) {
+            Text(
+                text = if (isServerRunning) "Stop Engine" else "Start Engine",
+                style = MaterialTheme.typography.labelLarge
+            )
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(24.dp))
+
+        if (!isBluetoothEnabled) {
+            Button(
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                onClick = onEnableBluetooth,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondary
+                )
+            ) {
+                Text(
+                    text = "Turn On Bluetooth",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
         
-        Text("Activity Logs:", fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.align(Alignment.Start))
+        Text(
+            "Activity Logs",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.align(Alignment.Start).padding(bottom = 8.dp)
+        )
         
-        Box(
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(120.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color.DarkGray.copy(alpha = 0.1f))
-                .padding(8.dp)
+                .height(140.dp)
+                .clip(RoundedCornerShape(12.dp)),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         ) {
-            LazyColumn {
-                items(LogManager.logs) { log ->
+            LazyColumn(modifier = Modifier.padding(12.dp)) {
+                items(LogManager.logs.reversed()) { log ->
                     Text(
                         text = log,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurface
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 4.dp)
                     )
                 }
             }
