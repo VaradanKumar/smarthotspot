@@ -24,16 +24,16 @@ object NotificationHelper {
 
             val hotspotChannel = NotificationChannel(
                 CHANNEL_ID,
-                "Smart Hotspot Status",
+                "AirBeam Activity",
                 NotificationManager.IMPORTANCE_HIGH
             )
 
             val serviceChannel = NotificationChannel(
                 SERVICE_CHANNEL_ID,
-                "Hotspot Remote Service",
+                "AirBeam Engine",
                 NotificationManager.IMPORTANCE_MIN
             ).apply {
-                description = "Keeps the Bluetooth server running in the background"
+                description = "Keeps the AirBeam server running"
                 setShowBadge(false)
             }
 
@@ -45,9 +45,9 @@ object NotificationHelper {
 
     fun getServiceNotification(context: Context): android.app.Notification {
         return NotificationCompat.Builder(context, SERVICE_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("SmartHotspot Running")
-            .setContentText("Always ready for laptop commands")
+            .setSmallIcon(R.drawable.ic_airbeam)
+            .setContentTitle("AirBeam Active")
+            .setContentText("Listening for laptop commands")
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
@@ -80,8 +80,8 @@ object NotificationHelper {
             )
 
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("SmartHotspot")
+                .setSmallIcon(R.drawable.ic_airbeam)
+                .setContentTitle("AirBeam")
                 .setContentText(command)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)

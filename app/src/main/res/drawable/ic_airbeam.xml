@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- A modern, sharp "Beam" design representing speed and connectivity -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,2L4.5,20.29L5.21,21L12,18L18.79,21L19.5,20.29L12,2ZM12,15.5L7.5,17.5L12,5L16.5,17.5L12,15.5Z"/>
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,12l-2,2h4z"
+        android:alpha="0.7"/>
+</vector>

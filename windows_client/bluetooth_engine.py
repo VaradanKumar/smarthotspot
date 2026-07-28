@@ -10,6 +10,7 @@ from bleak import BleakClient, BleakScanner
 # SHARED CONFIGURATION (v6.0 - Nordic Standard BLE)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
+SECURITY_PIN = "1758" # Default PIN
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
 
@@ -42,6 +43,18 @@ class BluetoothEngine:
 
     def log(self, msg): self.log_callback(msg)
 
+    async def _get_rssi_async(self):
+        """Scans briefly and returns the RSSI (signal strength) of the phone."""
+        cfg = load_config()
+        mac = cfg.get("mac")
+        if not mac: return -100
+        
+        devices = await BleakScanner.discover(timeout=2.0)
+        for d in devices:
+            if d.address.upper() == mac.upper():
+                return d.rssi
+        return -100
+
     async def _find_and_connect_async(self):
         # 1. Quick Link (Cached)
         cfg = load_config()
@@ -72,7 +85,6 @@ class BluetoothEngine:
         await asyncio.sleep(1.0) # Let Windows GATT settle
         
         found = False
-        # Try up to 3 times to find the service (handles slow discovery)
         for attempt in range(3):
             for service in self.client.services:
                 for char in service.characteristics:
@@ -82,13 +94,9 @@ class BluetoothEngine:
                 if found: break
             if found: break
             if attempt < 2:
-                self.log(f"Retrying discovery (Attempt {attempt+2})...")
                 await asyncio.sleep(1.0)
 
         if not found:
-            # Debug: Log what WAS found to help the user
-            self.log("Verification failed. Windows Cache issue likely.")
-            self.log("Tip: Toggle Bluetooth on Phone & Laptop.")
             raise Exception("Command ID not found. Please toggle Bluetooth.")
 
         self.log("System Active.")
@@ -102,9 +110,11 @@ class BluetoothEngine:
         if not self.client or not self.client.is_connected:
             await self._find_and_connect_async()
             
-        self.log(f"Pushing: {cmd}")
+        # Secure Pushing with PIN
+        secure_payload = f"{SECURITY_PIN}:{cmd}"
+        self.log(f"Pushing Secure Command...")
         try:
-            await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"))
+            await self.client.write_gatt_char(COMMAND_CHAR_UUID, secure_payload.encode("utf-8"))
             self.log("Success!")
         except Exception as e:
             if retry:
@@ -118,6 +128,10 @@ class BluetoothEngine:
 
     def send_command(self, cmd):
         future = asyncio.run_coroutine_threadsafe(self._send_command_async(cmd), self.loop)
+        return future.result()
+
+    def get_rssi(self):
+        future = asyncio.run_coroutine_threadsafe(self._get_rssi_async(), self.loop)
         return future.result()
 
     async def disconnect_async(self):
