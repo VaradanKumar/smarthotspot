@@ -36,6 +36,7 @@ object BluetoothServer {
     private var gattServer: BluetoothGattServer? = null
     private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
+    private val connectedDevices = mutableSetOf<BluetoothDevice>()
     private var logCallback: ((String) -> Unit)? = null
     private var messageReceivedCallback: ((String) -> Unit)? = null
 
@@ -60,8 +61,14 @@ object BluetoothServer {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             mainHandler.post {
                 when (newState) {
-                    BluetoothProfile.STATE_CONNECTED -> log("BLE client connected")
-                    BluetoothProfile.STATE_DISCONNECTED -> log("BLE client disconnected")
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        log("BLE client connected")
+                        connectedDevices.add(device)
+                    }
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        log("BLE client disconnected")
+                        connectedDevices.remove(device)
+                    }
                 }
             }
         }
@@ -107,6 +114,21 @@ object BluetoothServer {
 
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, status, 0, null)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray?
+        ) {
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
         }
     }
@@ -205,7 +227,10 @@ object BluetoothServer {
     fun stopServer() {
         isRunning.set(false)
         isStarting.set(false)
-        mainHandler.post { closeResources() }
+        mainHandler.post { 
+            closeResources() 
+            connectedDevices.clear()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -228,10 +253,10 @@ object BluetoothServer {
         val characteristic = telemetryCharacteristic ?: return
         characteristic.value = data.toByteArray(Charsets.UTF_8)
         
-        // Notify any connected devices
-        gattServer?.let { server ->
-            // In a simple server, we notify all devices that might be listening
-            // Usually we'd track specific subscribed devices, but for AirBeam this works fine.
+        mainHandler.post {
+            connectedDevices.forEach { device ->
+                gattServer?.notifyCharacteristicChanged(device, characteristic, false)
+            }
         }
     }
 }

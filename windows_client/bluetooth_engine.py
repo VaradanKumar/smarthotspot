@@ -7,7 +7,7 @@ import threading
 import time
 from bleak import BleakClient, BleakScanner
 
-# SHARED CONFIGURATION (v6.0 - Nordic Standard BLE)
+# SHARED CONFIGURATION (v6.0 - AirBeam Pro)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
 TELEMETRY_CHAR_UUID = "00000002-94f3-9d29-7d6d-973bfba39e49"
@@ -55,9 +55,11 @@ class BluetoothEngine:
         cfg = load_config()
         mac = cfg.get("mac")
         if not mac: return -100
-        devices = await BleakScanner.discover(timeout=2.0)
-        for d in devices:
-            if d.address.upper() == mac.upper(): return d.rssi
+        try:
+            devices = await BleakScanner.discover(timeout=1.5)
+            for d in devices:
+                if d.address.upper() == mac.upper(): return d.rssi
+        except: pass
         return -100
 
     async def _find_and_connect_async(self):
@@ -74,28 +76,17 @@ class BluetoothEngine:
         if not device: raise Exception("Phone not found.")
         self.client = BleakClient(device)
         await self.client.connect()
-        
         await asyncio.sleep(1.0)
-        found = False
-        for attempt in range(3):
-            services = await self.client.get_services()
-            for service in services:
-                for char in service.characteristics:
-                    if char.uuid.lower() == COMMAND_CHAR_UUID.lower():
-                        found = True
-                        break
-                if found: break
-            if found: break
+        services = await self.client.get_services()
+        char = services.get_characteristic(COMMAND_CHAR_UUID)
+        if not char:
             await asyncio.sleep(1.0)
-
-        if not found: raise Exception("Command interface not visible.")
-
+            services = await self.client.get_services()
+            char = services.get_characteristic(COMMAND_CHAR_UUID)
+            if not char: raise Exception("Command ID not visible.")
         try:
             await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
-            await asyncio.sleep(0.5)
         except: pass
-
-        self.log("AirBeam Active.")
         save_config(mac=device.address)
 
     def connect(self):
@@ -106,6 +97,7 @@ class BluetoothEngine:
         if not self.client or not self.client.is_connected:
             await self._find_and_connect_async()
         try:
+            await asyncio.sleep(0.2)
             await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"), response=False)
         except Exception as e:
             if retry:
