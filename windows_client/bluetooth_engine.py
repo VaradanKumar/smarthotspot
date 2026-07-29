@@ -61,64 +61,41 @@ class BluetoothEngine:
         return -100
 
     async def _find_and_connect_async(self):
-        # 1. Quick Link (Cached)
         cfg = load_config()
         cached_mac = cfg.get("mac")
         device = None
-
         if cached_mac:
-            self.log(f"Quick Link: {cached_mac}")
             device = await BleakScanner.find_device_by_address(cached_mac, timeout=2.0)
-        
-        # 2. Burst Scan (Aggressive)
         if not device:
-            self.log("Searching air (Burst Scan)...")
             device = await BleakScanner.find_device_by_filter(
                 lambda d, ad: SERVICE_UUID.lower() in [u.lower() for u in ad.service_uuids],
                 timeout=4.0
             )
-        
-        if not device:
-            raise Exception("Phone not found. Ensure app engine is ON.")
-            
-        self.log(f"Linked: {device.name or 'SmartHotspot'}")
+        if not device: raise Exception("Phone not found.")
         self.client = BleakClient(device)
         await self.client.connect()
         
-        # --- NEW: Improved Discovery Sequence ---
-        self.log("Verifying Command Center...")
-        await asyncio.sleep(1.5) # Extra time for Windows to map GATT
-        
+        await asyncio.sleep(1.0)
         found = False
         for attempt in range(3):
-            # Refresh services
-            try:
-                services = await self.client.get_services()
-                for service in services:
-                    for char in service.characteristics:
-                        if char.uuid.lower() == COMMAND_CHAR_UUID.lower():
-                            found = True
-                            break
-                    if found: break
-            except: pass
-            
+            services = await self.client.get_services()
+            for service in services:
+                for char in service.characteristics:
+                    if char.uuid.lower() == COMMAND_CHAR_UUID.lower():
+                        found = True
+                        break
+                if found: break
             if found: break
-            if attempt < 2:
-                self.log(f"Discovery retry {attempt+2}...")
-                await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
 
-        if not found:
-            self.log("Verification failed. Please toggle Bluetooth on Phone/Laptop.")
-            raise Exception("Command ID not found. Cache issue likely.")
+        if not found: raise Exception("Command interface not visible.")
 
-        # --- Pro: Delayed Telemetry Subscription ---
         try:
-            self.log("Activating Health Monitor...")
             await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
-        except Exception as e:
-            self.log(f"Monitor Warning: {str(e)}")
+            await asyncio.sleep(0.5)
+        except: pass
 
-        self.log("System Active.")
+        self.log("AirBeam Active.")
         save_config(mac=device.address)
 
     def connect(self):
@@ -128,20 +105,14 @@ class BluetoothEngine:
     async def _send_command_async(self, cmd, retry=True):
         if not self.client or not self.client.is_connected:
             await self._find_and_connect_async()
-            
-        self.log(f"Pushing: {cmd}")
         try:
-            await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"))
-            self.log("Success!")
+            await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"), response=False)
         except Exception as e:
             if retry:
-                self.log("Auto-recovering link...")
                 await self.disconnect_async()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
                 await self._send_command_async(cmd, retry=False)
-            else:
-                self.log(f"Fail: {str(e)}")
-                raise e
+            else: raise e
 
     def send_command(self, cmd):
         future = asyncio.run_coroutine_threadsafe(self._send_command_async(cmd), self.loop)
@@ -159,7 +130,6 @@ class BluetoothEngine:
 
     def disconnect(self):
         asyncio.run_coroutine_threadsafe(self.disconnect_async(), self.loop)
-        self.log("Offline.")
 
     @property
     def is_connected(self):

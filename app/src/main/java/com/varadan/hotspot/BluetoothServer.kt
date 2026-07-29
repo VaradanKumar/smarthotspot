@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
@@ -156,6 +157,13 @@ object BluetoothServer {
                 BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
+            // Add CCCD Descriptor for notifications
+            val configDescriptor = BluetoothGattDescriptor(
+                UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"),
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            )
+            telemetryCharacteristic?.addDescriptor(configDescriptor)
+            
             service.addCharacteristic(telemetryCharacteristic)
 
             if (!gattServer!!.addService(service)) {
