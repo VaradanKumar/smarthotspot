@@ -7,7 +7,7 @@ import threading
 import time
 from bleak import BleakClient, BleakScanner
 
-# SHARED CONFIGURATION (v6.0 - AirBeam Pro)
+# SHARED CONFIGURATION (v6.0 - AirBeam Pro Universal)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
 TELEMETRY_CHAR_UUID = "00000002-94f3-9d29-7d6d-973bfba39e49"
@@ -77,11 +77,23 @@ class BluetoothEngine:
         self.client = BleakClient(device)
         await self.client.connect()
         await asyncio.sleep(1.0)
-        char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
+        
+        # UNIVERSAL SERVICE DISCOVERY
+        char = None
+        try:
+            char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
+        except AttributeError:
+            try:
+                services = await self.client.get_services()
+                char = services.get_characteristic(COMMAND_CHAR_UUID)
+            except: pass
+        
         if not char:
             await asyncio.sleep(1.0)
-            char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
-            if not char: raise Exception("Command ID not visible.")
+            try: char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
+            except: pass
+
+        if not char: raise Exception("Command ID not visible.")
         try:
             await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
         except: pass
