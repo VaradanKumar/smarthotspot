@@ -10,6 +10,7 @@ from bleak import BleakClient, BleakScanner
 # SHARED CONFIGURATION (v6.0 - Nordic Standard BLE)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
+TELEMETRY_CHAR_UUID = "00000002-94f3-9d29-7d6d-973bfba39e49"
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
 
@@ -28,9 +29,10 @@ def save_config(mac=None):
     except: pass
 
 class BluetoothEngine:
-    def __init__(self, log_callback):
+    def __init__(self, log_callback, telemetry_callback=None):
         self.client = None
         self.log_callback = log_callback
+        self.telemetry_callback = telemetry_callback
         self.loop = asyncio.new_event_loop()
         self._start_loop()
 
@@ -42,63 +44,38 @@ class BluetoothEngine:
 
     def log(self, msg): self.log_callback(msg)
 
+    async def _on_telemetry(self, sender, data):
+        try:
+            msg = data.decode("utf-8")
+            if self.telemetry_callback:
+                self.telemetry_callback(msg)
+        except: pass
+
     async def _get_rssi_async(self):
-        """Scans briefly and returns the RSSI (signal strength) of the phone."""
         cfg = load_config()
         mac = cfg.get("mac")
         if not mac: return -100
-        
         devices = await BleakScanner.discover(timeout=2.0)
         for d in devices:
-            if d.address.upper() == mac.upper():
-                return d.rssi
+            if d.address.upper() == mac.upper(): return d.rssi
         return -100
 
     async def _find_and_connect_async(self):
-        # 1. Quick Link (Cached)
         cfg = load_config()
         cached_mac = cfg.get("mac")
         device = None
-
         if cached_mac:
-            self.log(f"Quick Link: {cached_mac}")
             device = await BleakScanner.find_device_by_address(cached_mac, timeout=2.0)
-        
-        # 2. Burst Scan (Aggressive)
         if not device:
-            self.log("Searching air (Burst Scan)...")
             device = await BleakScanner.find_device_by_filter(
                 lambda d, ad: SERVICE_UUID.lower() in [u.lower() for u in ad.service_uuids],
                 timeout=4.0
             )
-        
-        if not device:
-            raise Exception("Phone not found. Ensure app engine is ON.")
-            
-        self.log(f"Linked: {device.name or 'SmartHotspot'}")
+        if not device: raise Exception("Phone not found.")
         self.client = BleakClient(device)
         await self.client.connect()
-        
-        # --- NEW: Reliability Delay & Multi-pass Verification ---
-        self.log("Verifying Command Center...")
-        await asyncio.sleep(1.0) # Let Windows GATT settle
-        
-        found = False
-        for attempt in range(3):
-            for service in self.client.services:
-                for char in service.characteristics:
-                    if char.uuid.lower() == COMMAND_CHAR_UUID.lower():
-                        found = True
-                        break
-                if found: break
-            if found: break
-            if attempt < 2:
-                await asyncio.sleep(1.0)
-
-        if not found:
-            raise Exception("Command ID not found. Please toggle Bluetooth.")
-
-        self.log("System Active.")
+        try: await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
+        except: pass
         save_config(mac=device.address)
 
     def connect(self):
@@ -108,20 +85,14 @@ class BluetoothEngine:
     async def _send_command_async(self, cmd, retry=True):
         if not self.client or not self.client.is_connected:
             await self._find_and_connect_async()
-            
-        self.log(f"Pushing command...")
         try:
             await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"))
-            self.log("Success!")
         except Exception as e:
             if retry:
-                self.log("Auto-recovering link...")
                 await self.disconnect_async()
                 await asyncio.sleep(0.5)
                 await self._send_command_async(cmd, retry=False)
-            else:
-                self.log(f"Fail: {str(e)}")
-                raise e
+            else: raise e
 
     def send_command(self, cmd):
         future = asyncio.run_coroutine_threadsafe(self._send_command_async(cmd), self.loop)
@@ -139,7 +110,6 @@ class BluetoothEngine:
 
     def disconnect(self):
         asyncio.run_coroutine_threadsafe(self.disconnect_async(), self.loop)
-        self.log("Offline.")
 
     @property
     def is_connected(self):

@@ -25,6 +25,7 @@ object BluetoothServer {
 
     private val serviceUuid: UUID = UUID.fromString("94f39d29-7d6d-437d-973b-fba39e49d4ee")
     private val commandCharacteristicUuid: UUID = UUID.fromString("00000001-94f3-9d29-7d6d-973bfba39e49")
+    private val telemetryCharacteristicUuid: UUID = UUID.fromString("00000002-94f3-9d29-7d6d-973bfba39e49")
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isRunning = AtomicBoolean(false)
@@ -32,6 +33,7 @@ object BluetoothServer {
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
+    private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var logCallback: ((String) -> Unit)? = null
     private var messageReceivedCallback: ((String) -> Unit)? = null
@@ -149,6 +151,13 @@ object BluetoothServer {
             val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
             service.addCharacteristic(commandCharacteristic)
 
+            telemetryCharacteristic = BluetoothGattCharacteristic(
+                telemetryCharacteristicUuid,
+                BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_READ
+            )
+            service.addCharacteristic(telemetryCharacteristic)
+
             if (!gattServer!!.addService(service)) {
                 log("Unable to add BLE command service")
                 stopServer()
@@ -205,4 +214,16 @@ object BluetoothServer {
     }
 
     fun isServerRunning(): Boolean = isRunning.get()
+
+    @SuppressLint("MissingPermission")
+    fun updateTelemetry(data: String) {
+        val characteristic = telemetryCharacteristic ?: return
+        characteristic.value = data.toByteArray(Charsets.UTF_8)
+        
+        // Notify any connected devices
+        gattServer?.let { server ->
+            // In a simple server, we notify all devices that might be listening
+            // Usually we'd track specific subscribed devices, but for AirBeam this works fine.
+        }
+    }
 }

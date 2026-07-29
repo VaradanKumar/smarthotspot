@@ -8,7 +8,10 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.RingtoneManager
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -60,6 +63,29 @@ object NotificationHelper {
 
     fun sendHotspotOff(context: Context): Boolean {
         return sendNotification(context, 101, "HOTSPOT_OFF")
+    }
+
+    fun triggerLocateAlarm(context: Context) {
+        val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), 0))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(longArrayOf(0, 500, 200, 500), 0)
+        }
+
+        val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        val ringtone = RingtoneManager.getRingtone(context, alarmUri)
+        ringtone.play()
+
+        // Send a high priority notification to stop the alarm
+        sendNotification(context, 200, "LOCATING DEVICE - Tap to stop")
+        
+        // Stop after 30 seconds automatically to avoid infinite ringing
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            vibrator.cancel()
+            if (ringtone.isPlaying) ringtone.stop()
+        }, 30000)
     }
 
     @SuppressLint("MissingPermission")

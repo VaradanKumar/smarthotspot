@@ -7,9 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.telephony.TelephonyManager
 import android.util.Log
 
 class BluetoothHotspotService : Service() {
@@ -22,6 +26,34 @@ class BluetoothHotspotService : Service() {
     }
 
     private val binder = LocalBinder()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    
+    private val telemetryRunnable = object : Runnable {
+        override fun run() {
+            updateTelemetryData()
+            mainHandler.postDelayed(this, 15000) // Every 15 seconds
+        }
+    }
+
+    private fun updateTelemetryData() {
+        if (!BluetoothServer.isServerRunning()) return
+
+        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        
+        // Simplified Signal check - on modern Android this often requires fine location
+        // We'll report "OK" if we can't get exact bars to avoid permission crashes
+        val signalLevel = try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                tm.signalStrength?.level ?: 3
+            } else {
+                3
+            }
+        } catch (e: Exception) { 3 }
+
+        BluetoothServer.updateTelemetry("B:$batteryPct|S:$signalLevel")
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): BluetoothHotspotService = this@BluetoothHotspotService
@@ -88,6 +120,7 @@ class BluetoothHotspotService : Service() {
             BluetoothServer.startServer(this, { logMsg -> broadcastUpdate(logMsg) }) { message ->
                 handleRemoteCommand(message)
             }
+            mainHandler.postDelayed(telemetryRunnable, 5000)
         }
     }
 
@@ -98,6 +131,7 @@ class BluetoothHotspotService : Service() {
         when {
             cmd.contains("HOTSPOT_ON") -> NotificationHelper.sendHotspotOn(this)
             cmd.contains("HOTSPOT_OFF") -> NotificationHelper.sendHotspotOff(this)
+            cmd.contains("LOCATE_PHONE") -> NotificationHelper.triggerLocateAlarm(this)
         }
     }
 
@@ -121,6 +155,7 @@ class BluetoothHotspotService : Service() {
         try {
             unregisterReceiver(bluetoothStateReceiver)
         } catch (_: Exception) {}
+        mainHandler.removeCallbacks(telemetryRunnable)
         BluetoothServer.stopServer()
         super.onDestroy()
     }
