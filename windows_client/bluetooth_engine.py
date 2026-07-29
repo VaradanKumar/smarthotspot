@@ -77,12 +77,10 @@ class BluetoothEngine:
         self.client = BleakClient(device)
         await self.client.connect()
         await asyncio.sleep(1.0)
-        services = await self.client.get_services()
-        char = services.get_characteristic(COMMAND_CHAR_UUID)
+        char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
         if not char:
             await asyncio.sleep(1.0)
-            services = await self.client.get_services()
-            char = services.get_characteristic(COMMAND_CHAR_UUID)
+            char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
             if not char: raise Exception("Command ID not visible.")
         try:
             await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
