@@ -37,6 +37,7 @@ object BluetoothServer {
     private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
     private val connectedDevices = mutableSetOf<BluetoothDevice>()
+    private val telemetrySubscribers = mutableSetOf<BluetoothDevice>()
     private var logCallback: ((String) -> Unit)? = null
     private var messageReceivedCallback: ((String) -> Unit)? = null
 
@@ -52,6 +53,11 @@ object BluetoothServer {
         }
 
         override fun onStartFailure(errorCode: Int) {
+            if (errorCode == ADVERTISE_FAILED_ALREADY_STARTED) {
+                isStarting.set(false)
+                isRunning.set(true)
+                return
+            }
             log("BLE advertising failed ($errorCode)")
             stopServer()
         }
@@ -62,28 +68,47 @@ object BluetoothServer {
             mainHandler.post {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
-                        log("BLE client connected")
-                        connectedDevices.add(device)
+                        if (status == BluetoothGatt.GATT_SUCCESS) {
+                            @SuppressLint("MissingPermission")
+                            val name = device.name ?: "Unknown Laptop"
+                            log("Connected: $name (${device.address})")
+                            connectedDevices.add(device)
+                        } else {
+                            log("BLE connection error ($status) for ${device.address}")
+                            // Connection failed, ensure we are still advertising
+                            startAdvertising()
+                        }
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        log("BLE client disconnected")
+                        @SuppressLint("MissingPermission")
+                        val name = device.name ?: "Unknown Laptop"
+                        log("Disconnected: $name (${device.address})")
                         connectedDevices.remove(device)
+                        telemetrySubscribers.remove(device)
+                        // Client disconnected, ensure we are still advertising if the server is active
+                        if (isRunning.get()) {
+                            startAdvertising()
+                        }
                     }
                 }
             }
         }
 
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
-            if (service.uuid != serviceUuid) return
-
             mainHandler.post {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    log("BLE service setup failed ($status)")
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    log("GATT Service added: ${service.uuid}")
+                    // Diagnostic: Log all services to confirm registration
+                    gattServer?.services?.forEach { s ->
+                        log("Visible Service: ${s.uuid.toString().take(8)}...")
+                    }
+                    if (service.uuid == serviceUuid) {
+                        startAdvertising()
+                    }
+                } else {
+                    log("FATAL: GATT service setup failed (status $status)")
                     stopServer()
-                    return@post
                 }
-
-                startAdvertising()
             }
         }
 
@@ -127,8 +152,23 @@ object BluetoothServer {
             offset: Int,
             value: ByteArray?
         ) {
+            val status = when {
+                descriptor.uuid != CLIENT_CHARACTERISTIC_CONFIG_UUID ||
+                    descriptor.characteristic.uuid != telemetryCharacteristicUuid -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+                preparedWrite || offset != 0 || value == null -> BluetoothGatt.GATT_INVALID_OFFSET
+                value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) -> {
+                    mainHandler.post { telemetrySubscribers.add(device) }
+                    BluetoothGatt.GATT_SUCCESS
+                }
+                value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) -> {
+                    mainHandler.post { telemetrySubscribers.remove(device) }
+                    BluetoothGatt.GATT_SUCCESS
+                }
+                else -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+            }
+
             if (responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                gattServer?.sendResponse(device, requestId, status, 0, null)
             }
         }
     }
@@ -189,10 +229,10 @@ object BluetoothServer {
             service.addCharacteristic(telemetryCharacteristic)
 
             if (!gattServer!!.addService(service)) {
-                log("Unable to add BLE command service")
+                log("FATAL: Unable to register AirBeam service")
                 stopServer()
             } else {
-                log("Starting BLE command service")
+                log("Registering service: ${service.uuid.toString().take(8)}...")
             }
         }
     }
@@ -212,12 +252,14 @@ object BluetoothServer {
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(true)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setTimeout(0)
             .build()
         val data = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(serviceUuid))
+            .setIncludeDeviceName(false) // Keep main pulse slim to avoid "Data Too Large"
             .build()
         val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(true) // Send name only when laptop specifically asks
             .build()
 
         advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
@@ -230,6 +272,7 @@ object BluetoothServer {
         mainHandler.post { 
             closeResources() 
             connectedDevices.clear()
+            telemetrySubscribers.clear()
         }
     }
 
@@ -254,9 +297,12 @@ object BluetoothServer {
         characteristic.value = data.toByteArray(Charsets.UTF_8)
         
         mainHandler.post {
-            connectedDevices.forEach { device ->
+            telemetrySubscribers.forEach { device ->
                 gattServer?.notifyCharacteristicChanged(device, characteristic, false)
             }
         }
     }
+
+    private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID =
+        UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 }

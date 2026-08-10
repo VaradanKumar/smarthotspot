@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
             list.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
+        list.add(Manifest.permission.READ_PHONE_STATE)
         return list.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
     }
 
@@ -187,6 +188,9 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
             list.add(Manifest.permission.ACCESS_FINE_LOCATION)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
+            list.add(Manifest.permission.READ_PHONE_STATE)
 
         if (list.isNotEmpty()) requestPermissionLauncher.launch(list.toTypedArray())
     }

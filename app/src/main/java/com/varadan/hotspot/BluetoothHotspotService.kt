@@ -1,5 +1,6 @@
 package com.varadan.hotspot
 
+import android.annotation.SuppressLint
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
@@ -13,8 +14,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyDisplayInfo
 import android.telephony.TelephonyManager
 import android.util.Log
+import java.util.concurrent.Executors
 
 class BluetoothHotspotService : Service() {
 
@@ -27,22 +31,74 @@ class BluetoothHotspotService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var currentDisplayInfo: Int = -1
+    private var telephonyCallback: Any? = null
+
+    private fun startNetworkMonitoring() {
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : android.telephony.TelephonyCallback(), android.telephony.TelephonyCallback.DisplayInfoListener {
+                    override fun onDisplayInfoChanged(telephonyDisplayInfo: TelephonyDisplayInfo) {
+                        currentDisplayInfo = telephonyDisplayInfo.overrideNetworkType
+                    }
+                }
+                tm.registerTelephonyCallback(Executors.newSingleThreadExecutor(), callback)
+                telephonyCallback = callback
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    override fun onDisplayInfoChanged(telephonyDisplayInfo: TelephonyDisplayInfo) {
+                        currentDisplayInfo = telephonyDisplayInfo.overrideNetworkType
+                    }
+                }
+                tm.listen(listener, PhoneStateListener.LISTEN_DISPLAY_INFO_CHANGED)
+                telephonyCallback = listener
+            }
+        } catch (e: Exception) {
+            Log.e("AirBeam", "Failed to start network monitoring: ${e.message}")
+        }
+    }
+
+    private fun stopNetworkMonitoring() {
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val cb = telephonyCallback ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && cb is android.telephony.TelephonyCallback) {
+                tm.unregisterTelephonyCallback(cb)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && cb is PhoneStateListener) {
+                @Suppress("DEPRECATION")
+                tm.listen(cb, PhoneStateListener.LISTEN_NONE)
+            }
+            telephonyCallback = null
+        } catch (e: Exception) {
+            Log.e("AirBeam", "Failed to stop network monitoring: ${e.message}")
+        }
+    }
     
     private val telemetryRunnable = object : Runnable {
+        private var heartbeatCount = 0
         override fun run() {
-            updateTelemetryData()
+            if (BluetoothServer.isServerRunning()) {
+                updateTelemetryData()
+                heartbeatCount++
+                if (heartbeatCount >= 2) { // Every 30s
+                    broadcastUpdate("Engine Heartbeat: Active")
+                    heartbeatCount = 0
+                }
+            }
             mainHandler.postDelayed(this, 15000) // Every 15 seconds
         }
     }
+
+    private var isTelemetryLoopActive = false
 
     private fun updateTelemetryData() {
         if (!BluetoothServer.isServerRunning()) return
 
         val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        
-        // Simplified Signal check - on modern Android this often requires fine location
-        // We'll report "OK" if we can't get exact bars to avoid permission crashes
+
         val signalLevel = try {
             val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -52,7 +108,32 @@ class BluetoothHotspotService : Service() {
             }
         } catch (e: Exception) { 3 }
 
-        BluetoothServer.updateTelemetry("B:$batteryPct|S:$signalLevel")
+        val networkType = try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            
+            val is5G = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA ||
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED)
+            } else {
+                false
+            }
+
+            if (is5G) {
+                "5G"
+            } else {
+                @SuppressLint("MissingPermission")
+                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) tm.dataNetworkType else tm.networkType
+                when (type) {
+                    TelephonyManager.NETWORK_TYPE_NR -> "5G"
+                    TelephonyManager.NETWORK_TYPE_LTE -> "4G"
+                    TelephonyManager.NETWORK_TYPE_HSDPA, TelephonyManager.NETWORK_TYPE_HSPA -> "3G"
+                    else -> "4G"
+                }
+            }
+        } catch (e: Exception) { "LTE" }
+
+        val model = Build.MODEL.replace("|", "").replace(":", "")
+        BluetoothServer.updateTelemetry("B:$batteryPct|S:$signalLevel|N:$networkType|M:$model")
     }
 
     inner class LocalBinder : Binder() {
@@ -78,6 +159,7 @@ class BluetoothHotspotService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        startNetworkMonitoring()
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(bluetoothStateReceiver, filter, RECEIVER_EXPORTED)
@@ -117,9 +199,15 @@ class BluetoothHotspotService : Service() {
 
     fun ensureServerRunning() {
         if (!BluetoothServer.isServerRunning()) {
+            broadcastUpdate("Starting Engine...")
             BluetoothServer.startServer(this, { logMsg -> broadcastUpdate(logMsg) }) { message ->
                 handleRemoteCommand(message)
             }
+        }
+        
+        // Only start telemetry if server is running or starting
+        if (!isTelemetryLoopActive) {
+            isTelemetryLoopActive = true
             mainHandler.postDelayed(telemetryRunnable, 5000)
         }
     }
@@ -155,6 +243,7 @@ class BluetoothHotspotService : Service() {
         try {
             unregisterReceiver(bluetoothStateReceiver)
         } catch (_: Exception) {}
+        stopNetworkMonitoring()
         mainHandler.removeCallbacks(telemetryRunnable)
         BluetoothServer.stopServer()
         super.onDestroy()

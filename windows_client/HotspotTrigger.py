@@ -8,7 +8,6 @@ from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import Qt, QLockFile, QDir
 
 class SleepWatcher(QWidget):
-    """Hidden widget to catch Windows power events."""
     def __init__(self, callback):
         super().__init__()
         self.callback = callback
@@ -30,16 +29,17 @@ class HotspotTrayApp:
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
         self.engine = bt.BluetoothEngine(lambda msg: None, self._handle_telemetry)
+        self.engine.auto_reconnect = True 
         
         self.tray = QSystemTrayIcon()
         self.tray.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon))
-        self.tray.setToolTip("AirBeam: Standby")
         
         self.menu = QMenu()
+        self.menu.addAction("Connect").triggered.connect(lambda: threading.Thread(target=self.engine.connect, daemon=True).start())
+        self.menu.addAction("Disconnect").triggered.connect(self.engine.disconnect)
+        self.menu.addSeparator()
         self.menu.addAction("Hotspot ON").triggered.connect(lambda: self.trigger("HOTSPOT_ON"))
         self.menu.addAction("Hotspot OFF").triggered.connect(lambda: self.trigger("HOTSPOT_OFF"))
-        self.menu.addSeparator()
-        self.menu.addAction("Locate My Phone").triggered.connect(lambda: self.trigger("LOCATE_PHONE"))
         self.menu.addSeparator()
         self.menu.addAction("Exit").triggered.connect(self._exit_app)
         
@@ -47,9 +47,6 @@ class HotspotTrayApp:
         self.tray.show()
 
         self.proximity_active = True
-        self.last_notified = 0
-        self.RSSI_THRESHOLD = -65 
-        
         self.watcher = SleepWatcher(self._on_sleep)
         self.watcher.hide()
 
@@ -57,11 +54,14 @@ class HotspotTrayApp:
 
     def _handle_telemetry(self, data):
         try:
-            parts = data.split("|")
-            bat = parts[0].split(":")[1]
-            sig = parts[1].split(":")[1]
-            sig_text = { "0": "None", "1": "Poor", "2": "Fair", "3": "Good", "4": "Excellent" }.get(sig, "OK")
-            self.tray.setToolTip(f"AirBeam: S22 Plus\nBattery: {bat}%\nSignal: {sig_text}")
+            bat = data.get('B', '--')
+            sig = data.get('S', '0')
+            net = data.get('N', 'LTE')
+            chg = data.get('C', '0')
+            sig_text = {"0":"None", "1":"Poor", "2":"Fair", "3":"Good", "4":"Excellent"}.get(sig, "OK")
+            charge_status = " (Charging)" if chg == "1" else ""
+            name = self.engine.connected_device_name
+            self.tray.setToolTip(f"AirBeam: {name}\nBattery: {bat}%{charge_status}\nNetwork: {net}\nSignal: {sig_text}")
         except: pass
 
     def _on_sleep(self):
@@ -70,23 +70,20 @@ class HotspotTrayApp:
 
     def _proximity_loop(self):
         while self.proximity_active:
-            try:
-                rssi = self.engine.get_rssi()
-                if rssi > self.RSSI_THRESHOLD:
-                    now = time.time()
-                    if now - self.last_notified > 600:
-                        self.tray.showMessage("AirBeam Pro", "Phone nearby. Toggle Hotspot?", QSystemTrayIcon.Information, 5000)
-                        self.last_notified = now
-            except: pass
-            time.sleep(10)
+            if not self.engine.is_connected:
+                try:
+                    rssi = self.engine.get_rssi()
+                    if rssi > -65:
+                        self.tray.showMessage("AirBeam Pro", "Phone nearby.", QSystemTrayIcon.Information, 3000)
+                except: pass
+            time.sleep(15)
 
     def trigger(self, cmd):
         def task():
             try:
                 self.engine.send_command(cmd)
-                self.tray.showMessage("AirBeam Pro", f"Sent: {cmd}")
             except Exception as e: 
-                self.tray.showMessage("Error", f"Link Failed: {str(e)}")
+                self.tray.showMessage("Error", f"Failed: {str(e)}")
         threading.Thread(target=task, daemon=True).start()
 
     def _exit_app(self):
