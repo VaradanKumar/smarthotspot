@@ -6,6 +6,7 @@
 /.idea/modules.xml
 /.idea/workspace.xml
 /.idea/navEditor.xml
+
 /.idea/assetWizardSettings.xml
 .DS_Store
 /build
@@ -16,3 +17,5 @@ local.properties
 __pycache__/
 *.py[cod]
 .artifacts/
+*.log
+.idea/
