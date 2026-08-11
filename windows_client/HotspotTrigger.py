@@ -32,7 +32,11 @@ class HotspotTrayApp:
         self.engine.auto_reconnect = True 
         
         self.tray = QSystemTrayIcon()
-        self.tray.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon))
+        icon_path = os.path.join(os.path.dirname(__file__), "airbeam.ico")
+        if os.path.exists(icon_path):
+            self.tray.setIcon(QIcon(icon_path))
+        else:
+            self.tray.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon))
         
         self.menu = QMenu()
         self.menu.addAction("Connect").triggered.connect(lambda: threading.Thread(target=self.engine.connect, daemon=True).start())

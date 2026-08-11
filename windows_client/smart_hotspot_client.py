@@ -14,6 +14,10 @@ class SmartHotspotApp(ctk.CTk):
         self.title("AirBeam Pro Dashboard")
         self.geometry("450x680")
         
+        icon_path = os.path.join(os.path.dirname(__file__), "airbeam.ico")
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
+        
         self.log_file = os.path.join(os.path.dirname(__file__), "smart_hotspot.log")
         
         # UI Variables
@@ -37,10 +41,19 @@ class SmartHotspotApp(ctk.CTk):
             bat = data.get('B', '--')
             sig = data.get('S', '0')
             net = data.get('N', 'LTE')
+            chg = data.get('C', '0')
             
             sig_text = {"0":"None", "1":"Poor", "2":"Fair", "3":"Good", "4":"Excellent"}.get(sig, "OK")
             
-            self.after(0, lambda: self.battery_var.set(f"{bat}%"))
+            # Update battery with charging indicator
+            bat_display = f"{bat}%"
+            if chg == "1":
+                bat_display = f"⚡ {bat}%"
+                self.after(0, lambda: self.battery_lbl.configure(text_color="#2ecc71")) # Green when charging
+            else:
+                self.after(0, lambda: self.battery_lbl.configure(text_color="#3498db")) # Blue normally
+
+            self.after(0, lambda: self.battery_var.set(bat_display))
             self.after(0, lambda: self.signal_var.set(sig_text))
             self.after(0, lambda: self.network_var.set(net))
             
@@ -81,7 +94,8 @@ class SmartHotspotApp(ctk.CTk):
         
         # Battery
         ctk.CTkLabel(dash_frame, text="BATTERY", font=("Arial", 10, "bold"), text_color="#aaaaaa").grid(row=0, column=0, pady=(15, 0))
-        ctk.CTkLabel(dash_frame, textvariable=self.battery_var, font=("Arial", 20, "bold"), text_color="#3498db").grid(row=1, column=0, pady=(0, 15))
+        self.battery_lbl = ctk.CTkLabel(dash_frame, textvariable=self.battery_var, font=("Arial", 20, "bold"), text_color="#3498db")
+        self.battery_lbl.grid(row=1, column=0, pady=(0, 15))
         
         ctk.CTkLabel(dash_frame, text="NETWORK", font=("Arial", 10, "bold"), text_color="#aaaaaa").grid(row=0, column=1, pady=(15, 0))
         ctk.CTkLabel(dash_frame, textvariable=self.network_var, font=("Arial", 20, "bold"), text_color="#3498db").grid(row=1, column=1, pady=(0, 15))
