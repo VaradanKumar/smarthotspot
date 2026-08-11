@@ -14,11 +14,12 @@ class BootReceiver : BroadcastReceiver() {
             action == "android.intent.action.QUICKBOOT_POWERON" || 
             action == "com.htc.intent.action.QUICKBOOT_POWERON") {
             
-            Log.d("BootReceiver", "Starting SmartHotspot service automatically")
+            Log.d("BootReceiver", "Attempting to auto-start AirBeam service...")
             val serviceIntent = Intent(context, BluetoothHotspotService::class.java)
             try {
                 context.startForegroundService(serviceIntent)
             } catch (e: Exception) {
+                // This is common on Android 14+ if the app isn't allowed to start FGS from background
                 Log.e("BootReceiver", "Failed to auto-start service: ${e.message}")
             }
         }

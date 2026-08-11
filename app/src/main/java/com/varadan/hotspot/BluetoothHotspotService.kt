@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyDisplayInfo
 import android.telephony.TelephonyManager
@@ -23,6 +24,7 @@ import java.util.concurrent.Executors
 class BluetoothHotspotService : Service() {
 
     companion object {
+        private const val TAG = "HotspotService"
         private const val NOTIFICATION_ID = 1
         const val ACTION_LOG_UPDATE = "com.varadan.hotspot.ACTION_LOG_UPDATE"
         const val EXTRA_LOG_MESSAGE = "com.varadan.hotspot.EXTRA_LOG_MESSAGE"
@@ -31,8 +33,10 @@ class BluetoothHotspotService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile
     private var currentDisplayInfo: Int = -1
     private var telephonyCallback: Any? = null
+    private val telephonyExecutor = Executors.newSingleThreadExecutor()
 
     private fun startNetworkMonitoring() {
         try {
@@ -43,7 +47,7 @@ class BluetoothHotspotService : Service() {
                         currentDisplayInfo = telephonyDisplayInfo.overrideNetworkType
                     }
                 }
-                tm.registerTelephonyCallback(Executors.newSingleThreadExecutor(), callback)
+                tm.registerTelephonyCallback(telephonyExecutor, callback)
                 telephonyCallback = callback
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 @Suppress("DEPRECATION")
@@ -56,7 +60,7 @@ class BluetoothHotspotService : Service() {
                 telephonyCallback = listener
             }
         } catch (e: Exception) {
-            Log.e("AirBeam", "Failed to start network monitoring: ${e.message}")
+            Log.e(TAG, "Failed to start network monitoring: ${e.message}")
         }
     }
 
@@ -72,7 +76,7 @@ class BluetoothHotspotService : Service() {
             }
             telephonyCallback = null
         } catch (e: Exception) {
-            Log.e("AirBeam", "Failed to stop network monitoring: ${e.message}")
+            Log.e(TAG, "Failed to stop network monitoring: ${e.message}")
         }
     }
     
@@ -82,8 +86,9 @@ class BluetoothHotspotService : Service() {
             if (BluetoothServer.isServerRunning()) {
                 updateTelemetryData()
                 heartbeatCount++
-                if (heartbeatCount >= 2) { // Every 30s
-                    broadcastUpdate("Engine Heartbeat: Active")
+                if (heartbeatCount >= 4) { // Every 60s
+                    broadcastUpdate("System Health: OK")
+                    checkBatteryOptimization()
                     heartbeatCount = 0
                 }
             }
@@ -93,15 +98,33 @@ class BluetoothHotspotService : Service() {
 
     private var isTelemetryLoopActive = false
 
+    private fun checkBatteryOptimization() {
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+            broadcastUpdate("Warning: Battery Optimization is active. One UI may kill this service.")
+        }
+    }
+
     private fun updateTelemetryData() {
         if (!BluetoothServer.isServerRunning()) return
 
-        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val batteryPct = batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+
+        // BATTERY_PROPERTY_STATUS is not consistently supported by Android device
+        // vendors. The sticky battery broadcast is the supported source of charge state.
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = batteryIntent?.getIntExtra(
+            BatteryManager.EXTRA_STATUS,
+            BatteryManager.BATTERY_STATUS_UNKNOWN
+        ) ?: BatteryManager.BATTERY_STATUS_UNKNOWN
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                         status == BatteryManager.BATTERY_STATUS_FULL
+        val chargeFlag = if (isCharging) "1" else "0"
 
         val signalLevel = try {
-            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            if (tm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 tm.signalStrength?.level ?: 3
             } else {
                 3
@@ -109,31 +132,30 @@ class BluetoothHotspotService : Service() {
         } catch (e: Exception) { 3 }
 
         val networkType = try {
-            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-            
-            val is5G = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED)
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            if (tm == null) {
+                "Unknown"
             } else {
-                false
-            }
-
-            if (is5G) {
-                "5G"
-            } else {
-                @SuppressLint("MissingPermission")
-                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) tm.dataNetworkType else tm.networkType
-                when (type) {
-                    TelephonyManager.NETWORK_TYPE_NR -> "5G"
-                    TelephonyManager.NETWORK_TYPE_LTE -> "4G"
-                    TelephonyManager.NETWORK_TYPE_HSDPA, TelephonyManager.NETWORK_TYPE_HSPA -> "3G"
-                    else -> "4G"
+                val is5G = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && currentDisplayInfo == TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED)
+                } else false
+                if (is5G) {
+                    "5G"
+                } else {
+                    @SuppressLint("MissingPermission")
+                    when (tm.dataNetworkType) {
+                        TelephonyManager.NETWORK_TYPE_NR -> "5G"
+                        TelephonyManager.NETWORK_TYPE_LTE -> "4G"
+                        TelephonyManager.NETWORK_TYPE_HSDPA, TelephonyManager.NETWORK_TYPE_HSPA -> "3G"
+                        else -> "4G"
+                    }
                 }
             }
         } catch (e: Exception) { "LTE" }
 
         val model = Build.MODEL.replace("|", "").replace(":", "")
-        BluetoothServer.updateTelemetry("B:$batteryPct|S:$signalLevel|N:$networkType|M:$model")
+        BluetoothServer.updateTelemetry("B:$batteryPct|S:$signalLevel|N:$networkType|M:$model|C:$chargeFlag")
     }
 
     inner class LocalBinder : Binder() {
@@ -149,7 +171,7 @@ class BluetoothHotspotService : Service() {
                         ensureServerRunning()
                     }
                     BluetoothAdapter.STATE_OFF -> {
-                        broadcastUpdate("Bluetooth OFF detected")
+                        broadcastUpdate("Bluetooth OFF - Stopping Server")
                         BluetoothServer.stopServer()
                     }
                 }
@@ -159,6 +181,7 @@ class BluetoothHotspotService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "Service Created")
         startNetworkMonitoring()
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -189,23 +212,24 @@ class BluetoothHotspotService : Service() {
             }
             broadcastUpdate("Foreground Service Active")
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground service", e)
             broadcastUpdate("FGS Error: ${e.message}")
-            stopSelf()
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
 
-        ensureServerRunning()
+        // Do not call Bluetooth APIs before Android 12+ nearby-device permissions have been granted.
+        if (BluetoothManager.hasBluetoothPermission(this)) ensureServerRunning()
+        else broadcastUpdate("Bluetooth permission is required before starting the server")
         return START_STICKY
     }
 
     fun ensureServerRunning() {
-        if (!BluetoothServer.isServerRunning()) {
-            broadcastUpdate("Starting Engine...")
-            BluetoothServer.startServer(this, { logMsg -> broadcastUpdate(logMsg) }) { message ->
-                handleRemoteCommand(message)
-            }
+        // Re-attach log callback even if running
+        BluetoothServer.startServer(this, { logMsg -> broadcastUpdate(logMsg) }) { message ->
+            handleRemoteCommand(message)
         }
         
-        // Only start telemetry if server is running or starting
         if (!isTelemetryLoopActive) {
             isTelemetryLoopActive = true
             mainHandler.postDelayed(telemetryRunnable, 5000)
@@ -214,13 +238,18 @@ class BluetoothHotspotService : Service() {
 
     private fun handleRemoteCommand(message: String) {
         val cmd = message.trim().uppercase()
-        broadcastUpdate("Command: $cmd")
+        broadcastUpdate("Remote Cmd: $cmd")
         
-        when {
-            cmd.contains("HOTSPOT_ON") -> NotificationHelper.sendHotspotOn(this)
-            cmd.contains("HOTSPOT_OFF") -> NotificationHelper.sendHotspotOff(this)
-            cmd.contains("LOCATE_PHONE") -> NotificationHelper.triggerLocateAlarm(this)
+        when (cmd) {
+            "HOTSPOT_ON" -> reportNotificationResult("HOTSPOT_ON", NotificationHelper.sendHotspotOn(this))
+            "HOTSPOT_OFF" -> reportNotificationResult("HOTSPOT_OFF", NotificationHelper.sendHotspotOff(this))
+            "LOCATE_PHONE" -> NotificationHelper.triggerLocateAlarm(this)
+            else -> broadcastUpdate("Ignored unknown BLE command")
         }
+    }
+
+    private fun reportNotificationResult(command: String, posted: Boolean) {
+        if (!posted) broadcastUpdate("$command was received, but its notification could not be posted")
     }
 
     fun broadcastUpdate(message: String) {
@@ -229,22 +258,25 @@ class BluetoothHotspotService : Service() {
             putExtra(EXTRA_LOG_MESSAGE, message)
         }
         sendBroadcast(intent)
-        // Also keep writing to the old LogManager for now so the UI doesn't break
         LogManager.addLog(message)
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onUnbind(intent: Intent?): Boolean {
+        // Service remains running until explicitly stopped
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "Service Destroyed")
         try {
             unregisterReceiver(bluetoothStateReceiver)
         } catch (_: Exception) {}
         stopNetworkMonitoring()
+        telephonyExecutor.shutdownNow()
         mainHandler.removeCallbacks(telemetryRunnable)
+        isTelemetryLoopActive = false
         BluetoothServer.stopServer()
         super.onDestroy()
     }

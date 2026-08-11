@@ -1,18 +1,22 @@
 package com.varadan.hotspot
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothManager as AndroidBluetoothManager
 import android.content.*
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.core.net.toUri
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,10 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.varadan.hotspot.ui.theme.HotspotTheme
 import kotlinx.coroutines.delay
@@ -37,8 +39,9 @@ class MainActivity : ComponentActivity() {
     private var hotspotService: BluetoothHotspotService? = null
     private var isBound = false
 
-    private val bluetoothManager by lazy { getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager }
-    private val bluetoothAdapter by lazy { bluetoothManager.adapter }
+    private val bluetoothManager by lazy { getSystemService(Context.BLUETOOTH_SERVICE) as? AndroidBluetoothManager }
+    private val bluetoothAdapter by lazy { bluetoothManager?.adapter }
+    private var receiverRegistered = false
 
     private val enableBluetoothLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -51,9 +54,10 @@ class MainActivity : ComponentActivity() {
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as BluetoothHotspotService.LocalBinder
-            hotspotService = binder.getService()
-            isBound = true
+            (service as? BluetoothHotspotService.LocalBinder)?.let {
+                hotspotService = it.getService()
+                isBound = true
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -86,19 +90,30 @@ class MainActivity : ComponentActivity() {
         enableBluetoothLauncher.launch(intent)
     }
 
+    @SuppressLint("BatteryLife")
+    private fun requestIgnoreBatteryOptimizations() {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = "package:$packageName".toUri()
+        }
+        startActivity(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NotificationHelper.createChannel(this)
 
         setContent {
             HotspotTheme {
-                var isServerRunning by remember { mutableStateOf(BluetoothServer.isServerRunning()) }
+                var serverState by remember { mutableStateOf(BluetoothServer.getState()) }
                 var isBluetoothEnabled by remember { mutableStateOf(bluetoothAdapter?.isEnabled == true) }
-                
+                var isIgnoringBatteryOptimizations by remember { mutableStateOf(true) }
+
                 LaunchedEffect(Unit) {
+                    val pm = getSystemService(POWER_SERVICE) as PowerManager
                     while(true) {
-                        isServerRunning = BluetoothServer.isServerRunning()
-                        isBluetoothEnabled = bluetoothAdapter?.isEnabled == true
+                        serverState = BluetoothServer.getState()
+                        isBluetoothEnabled = com.varadan.hotspot.BluetoothManager.isBluetoothEnabled(this@MainActivity)
+                        isIgnoringBatteryOptimizations = pm.isIgnoringBatteryOptimizations(packageName)
                         delay(1000)
                     }
                 }
@@ -108,8 +123,9 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     HomeScreen(
-                        isServerRunning = isServerRunning,
+                        serverState = serverState,
                         isBluetoothEnabled = isBluetoothEnabled,
+                        isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations,
                         onEnableBluetooth = { requestEnableBluetooth() },
                         onToggleServer = {
                             if (hasAllPermissions()) {
@@ -117,7 +133,8 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 checkAndRequestPermissions()
                             }
-                        }
+                        },
+                        onRequestBatteryOptimization = { requestIgnoreBatteryOptimizations() }
                     )
                 }
             }
@@ -136,6 +153,7 @@ class MainActivity : ComponentActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(gattUpdateReceiver, filter)
         }
+        receiverRegistered = true
     }
 
     override fun onStop() {
@@ -143,7 +161,10 @@ class MainActivity : ComponentActivity() {
             unbindService(serviceConnection)
             isBound = false
         }
-        unregisterReceiver(gattUpdateReceiver)
+        if (receiverRegistered) {
+            unregisterReceiver(gattUpdateReceiver)
+            receiverRegistered = false
+        }
         super.onStop()
     }
 
@@ -166,10 +187,6 @@ class MainActivity : ComponentActivity() {
             list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             list.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-        list.add(Manifest.permission.READ_PHONE_STATE)
         return list.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
     }
 
@@ -185,24 +202,21 @@ class MainActivity : ComponentActivity() {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 list.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
-            list.add(Manifest.permission.READ_PHONE_STATE)
-
         if (list.isNotEmpty()) requestPermissionLauncher.launch(list.toTypedArray())
     }
 }
 
 @Composable
 fun HomeScreen(
-    isServerRunning: Boolean,
+    serverState: BluetoothServer.ServerState,
     isBluetoothEnabled: Boolean,
+    isIgnoringBatteryOptimizations: Boolean,
     onEnableBluetooth: () -> Unit,
-    onToggleServer: () -> Unit
+    onToggleServer: () -> Unit,
+    onRequestBatteryOptimization: () -> Unit
 ) {
+    val isRunning = serverState != BluetoothServer.ServerState.INACTIVE
+
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -210,37 +224,14 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(32.dp))
         
         Text(
-            text = "Smart Hotspot",
+            text = "AirBeam Pro",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold
         )
         
         Spacer(modifier = Modifier.height(32.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Row(
-                modifier = Modifier.padding(20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .background(if (isServerRunning) Color.Green else Color.Red, CircleShape)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = if (isServerRunning) "Status: Running" else "Status: Stopped",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
+        StatusCard(serverState)
         
         Spacer(modifier = Modifier.height(32.dp))
 
@@ -249,30 +240,31 @@ fun HomeScreen(
             onClick = onToggleServer,
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isServerRunning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                containerColor = if (isRunning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
             )
         ) {
             Text(
-                text = if (isServerRunning) "Stop Engine" else "Start Engine",
+                text = if (isRunning) "Stop Engine" else "Start Engine",
                 style = MaterialTheme.typography.labelLarge
             )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         if (!isBluetoothEnabled) {
-            Button(
+            OutlinedButton(
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 onClick = onEnableBluetooth,
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.secondary
-                )
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Text(
-                    text = "Turn On Bluetooth",
-                    style = MaterialTheme.typography.labelLarge
-                )
+                Text("Enable Bluetooth")
+            }
+        }
+
+        if (!isIgnoringBatteryOptimizations) {
+            Spacer(modifier = Modifier.height(8.dp))
+            TextButton(onClick = onRequestBatteryOptimization) {
+                Text("Disable Battery Optimization (Recommended for S22)", color = MaterialTheme.colorScheme.error)
             }
         }
 
@@ -287,7 +279,7 @@ fun HomeScreen(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(140.dp)
+                .height(180.dp)
                 .clip(RoundedCornerShape(12.dp)),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         ) {
@@ -300,6 +292,42 @@ fun HomeScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun StatusCard(state: BluetoothServer.ServerState) {
+    val (statusText, color) = when (state) {
+        BluetoothServer.ServerState.INACTIVE -> "Stopped" to Color.Red
+        BluetoothServer.ServerState.STARTING -> "Starting..." to Color.Yellow
+        BluetoothServer.ServerState.GATT_READY -> "Ready" to Color.Cyan
+        BluetoothServer.ServerState.ADVERTISING -> "Broadcasting" to Color.Green
+        BluetoothServer.ServerState.STOPPING -> "Stopping..." to Color.Gray
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .background(color, CircleShape)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "Status: $statusText",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }

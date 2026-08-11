@@ -20,34 +20,34 @@ class HotspotTileService : TileService() {
         
         if (isRunning) {
             intent.action = BluetoothHotspotService.ACTION_STOP_SERVICE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
+            startForegroundService(intent)
         } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
+            startForegroundService(intent)
         }
         
         // Give it a moment to update state then refresh tile
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             updateTile()
-        }, 500)
+        }, 1000)
     }
 
     private fun updateTile() {
         val tile = qsTile ?: return
-        val isRunning = BluetoothServer.isServerRunning()
+        val state = BluetoothServer.getState()
+        val isRunning = state != BluetoothServer.ServerState.INACTIVE
         
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = "AirBeam"
+        tile.label = "AirBeam Pro"
         tile.icon = Icon.createWithResource(this, R.drawable.ic_airbeam)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            tile.subtitle = if (isRunning) "Ready" else "Standby"
+            tile.subtitle = when (state) {
+                BluetoothServer.ServerState.INACTIVE -> "Standby"
+                BluetoothServer.ServerState.STARTING -> "Starting..."
+                BluetoothServer.ServerState.GATT_READY -> "Ready"
+                BluetoothServer.ServerState.ADVERTISING -> "Broadcasting"
+                BluetoothServer.ServerState.STOPPING -> "Stopping..."
+            }
         }
         tile.updateTile()
     }

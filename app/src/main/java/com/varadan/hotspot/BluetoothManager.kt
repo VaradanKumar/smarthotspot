@@ -11,8 +11,8 @@ import androidx.core.content.ContextCompat
 object BluetoothManager {
 
     private fun getAdapter(context: Context): BluetoothAdapter? {
-        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as AndroidBluetoothManager
-        return bluetoothManager.adapter
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? AndroidBluetoothManager
+        return bluetoothManager?.adapter
     }
 
     fun isBluetoothSupported(context: Context): Boolean {
@@ -29,12 +29,7 @@ object BluetoothManager {
             val connect = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
             val advertise = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE)
             connect == PackageManager.PERMISSION_GRANTED && advertise == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-        }
+        } else true // This app advertises only; it does not scan on Android 11 and lower.
     }
 
     fun getBluetoothName(context: Context): String {

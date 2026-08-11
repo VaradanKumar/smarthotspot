@@ -16,13 +16,8 @@ if %ERRORLEVEL% NEQ 0 (
     %PY% -m pip install PySide6 bleak customtkinter >nul 2>&1
 )
 
-:: 3. Launch Logic
-:: We use 'tasklist' to check if the apps are already active
-tasklist /FI "WINDOWTITLE eq AirBeam Pro Dashboard" | find /i "pythonw.exe" >nul
-if %ERRORLEVEL% NEQ 0 (
-    start "AirBeam Pro Dashboard" /min %PY%w smart_hotspot_client.py
-)
-
+:: 3. Launch one BLE owner. Starting both desktop front ends creates two
+:: independent BLE clients that compete for the same phone connection.
 tasklist /FI "IMAGENAME eq pythonw.exe" | find /i "HotspotTrigger.py" >nul
 if %ERRORLEVEL% NEQ 0 (
     start "AirBeam Pro Tray" /min %PY%w HotspotTrigger.py

@@ -1,34 +1,41 @@
 import asyncio
 import json
 import os
-import re
-import subprocess
 import threading
-import time
 from bleak import BleakClient, BleakScanner
 
-# SHARED CONFIGURATION (v6.0 - AirBeam Pro Universal)
 SERVICE_UUID = "94f39d29-7d6d-437d-973b-fba39e49d4ee"
 COMMAND_CHAR_UUID = "00000001-94f3-9d29-7d6d-973bfba39e49"
 TELEMETRY_CHAR_UUID = "00000002-94f3-9d29-7d6d-973bfba39e49"
-
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".smart_hotspot_config.json")
 
+
 def load_config():
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r') as f: return json.load(f)
-        except: pass
-    return {"mac": ""}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, ValueError):
+        return {"mac": ""}
+
 
 def save_config(mac=None):
-    cfg = load_config()
-    if mac is not None: cfg["mac"] = mac
+    config = load_config()
+    if mac is not None:
+        config["mac"] = mac
     try:
-        with open(CONFIG_PATH, 'w') as f: json.dump(cfg, f)
-    except: pass
+        with open(CONFIG_PATH, "w", encoding="utf-8") as file:
+            json.dump(config, file)
+    except OSError:
+        pass
+
 
 class BluetoothEngine:
+    """Single-loop, single-client BLE owner.
+
+    Bleak clients, scanning, service discovery, and GATT writes are serialized here.
+    This prevents two background reconnects or a button press from retaining stale
+    client objects and issuing overlapping GATT operations.
+    """
     def __init__(self, log_callback, telemetry_callback=None):
         self.client = None
         self.log_callback = log_callback
@@ -37,150 +44,162 @@ class BluetoothEngine:
         self.auto_reconnect = False
         self.is_manual_disconnect = False
         self.loop = asyncio.new_event_loop()
+        self._connection_lock = None
+        self._command_lock = None
+        self._closing = False
+        self._thread_ready = threading.Event()
         self._start_loop()
+        self._thread_ready.wait(timeout=5)
 
     def _start_loop(self):
         def run_loop():
             asyncio.set_event_loop(self.loop)
+            self._connection_lock = asyncio.Lock()
+            self._command_lock = asyncio.Lock()
             self.loop.create_task(self._auto_reconnect_loop())
+            self._thread_ready.set()
             self.loop.run_forever()
-        threading.Thread(target=run_loop, daemon=True).start()
+        threading.Thread(target=run_loop, daemon=True, name="AirBeamBluetooth").start()
+
+    def log(self, message):
+        try:
+            self.log_callback(message)
+        except Exception:
+            pass
 
     async def _auto_reconnect_loop(self):
-        while True:
-            if self.auto_reconnect and not self.is_manual_disconnect:
-                if not self.client or not self.client.is_connected:
-                    try:
-                        # Background auto-connect
-                        await self._find_and_connect_async(is_background=True)
-                    except: pass
-            await asyncio.sleep(60)
+        delay_seconds = 5
+        while not self._closing:
+            if self.auto_reconnect and not self.is_manual_disconnect and not self.is_connected:
+                try:
+                    await self._connect_serialized(is_background=True)
+                    delay_seconds = 5
+                except Exception as error:
+                    self.log(f"Auto-link retry failed: {error}")
+                    delay_seconds = min(delay_seconds * 2, 60)
+            await asyncio.sleep(delay_seconds)
 
-    def log(self, msg): self.log_callback(msg)
+    def _on_disconnected(self, client):
+        # Bleak invokes this on its event loop. Do not call connect/disconnect here.
+        if self.client is client:
+            self.client = None
+            self.log("Phone disconnected")
 
-    async def _on_telemetry(self, sender, data):
+    def _on_telemetry(self, _sender, data):
         try:
-            msg = data.decode("utf-8")
+            message = bytes(data).decode("utf-8")
             telemetry = {}
-            for part in msg.split("|"):
-                kv = part.split(":")
-                if len(kv) == 2: telemetry[kv[0]] = kv[1]
-            
-            if telemetry.get('M') and (not self.connected_device_name or self.connected_device_name == "Unknown Phone"):
-                self.connected_device_name = telemetry['M']
-
+            for part in message.split("|"):
+                key, separator, value = part.partition(":")
+                if separator:
+                    telemetry[key] = value
+            if telemetry.get("M"):
+                self.connected_device_name = telemetry["M"]
             if self.telemetry_callback:
                 self.telemetry_callback(telemetry)
-        except: pass
+        except (UnicodeDecodeError, ValueError) as error:
+            self.log(f"Ignored malformed telemetry: {error}")
+
+    async def _find_device(self):
+        def matches_service(device, advertisement):
+            return SERVICE_UUID.lower() in {uuid.lower() for uuid in (advertisement.service_uuids or [])}
+        return await BleakScanner.find_device_by_filter(matches_service, timeout=10.0)
+
+    async def _disconnect_current_locked(self):
+        client = self.client
+        self.client = None  # invalidate before awaiting callbacks from a stale client
+        if client:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception as error:
+                self.log(f"Stale connection cleanup failed: {error}")
+
+    async def _connect_serialized(self, is_background=False):
+        async with self._connection_lock:
+            if self.client and self.client.is_connected:
+                return
+            await self._disconnect_current_locked()
+            if not is_background:
+                self.log("Scanning for phone…")
+            device = await self._find_device()
+            if not device:
+                raise RuntimeError("Phone not found. Ensure Bluetooth is on and AirBeam is running.")
+
+            self.connected_device_name = device.name or "Phone"
+            client = BleakClient(device, timeout=20.0, disconnected_callback=self._on_disconnected, winrt={"use_cached_services": False})
+            try:
+                await client.connect()
+                if not client.is_connected:
+                    raise RuntimeError("Windows reported a disconnected BLE client")
+                command = client.services.get_characteristic(COMMAND_CHAR_UUID)
+                if command is None:
+                    raise RuntimeError("Phone does not expose the AirBeam command characteristic")
+                self.client = client
+                try:
+                    await client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
+                except Exception as error:
+                    # Telemetry is optional; control commands must still work.
+                    self.log(f"Telemetry subscription unavailable: {error}")
+                save_config(mac=device.address)
+                self.log("Linked successfully." if not is_background else f"Auto-linked: {self.connected_device_name}")
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                raise
+
+    async def _send_command_async(self, command):
+        if command not in {"HOTSPOT_ON", "HOTSPOT_OFF", "LOCATE_PHONE"}:
+            raise ValueError("Unsupported AirBeam command")
+        async with self._command_lock:
+            if not self.client or not self.client.is_connected:
+                await self._connect_serialized()
+            client = self.client
+            try:
+                # A write response makes delivery observable. The Android server supports it.
+                await client.write_gatt_char(COMMAND_CHAR_UUID, command.encode("utf-8"), response=True)
+                self.log(f"Sent {command}")
+            except Exception:
+                # A failed write generally means the Windows object is stale. Release it so
+                # the next explicit command or auto-link creates a new client.
+                async with self._connection_lock:
+                    if self.client is client:
+                        await self._disconnect_current_locked()
+                raise
 
     async def _get_rssi_async(self):
         if self.client and self.client.is_connected:
-            return -100
+            return -100  # Windows does not expose connected BLE RSSI through Bleak reliably.
         try:
-            devices = await BleakScanner.discover(timeout=1.0)
-            cfg = load_config()
-            mac = cfg.get("mac")
-            if mac:
-                for d in devices:
-                    if d.address.upper() == mac.upper(): return d.rssi
-        except: pass
+            devices = await BleakScanner.discover(timeout=3.0)
+            remembered_address = load_config().get("mac", "").upper()
+            for device in devices:
+                if device.address.upper() == remembered_address:
+                    return getattr(device, "rssi", -100)
+        except Exception as error:
+            self.log(f"RSSI scan failed: {error}")
         return -100
-
-    async def _find_and_connect_async(self, is_background=False):
-        try:
-            # ROBUST DISCOVERY: Skip MAC check and scan for the AirBeam Service directly.
-            # This handles Android MAC rotation automatically.
-            if not is_background: self.log("Scanning for phone (Turbo-Discovery)...")
-            
-            def detection_callback(d, ad):
-                return SERVICE_UUID.lower() in [u.lower() for u in ad.service_uuids]
-
-            device = await BleakScanner.find_device_by_filter(detection_callback, timeout=6.0)
-            
-            if not device:
-                raise Exception("Phone not found. Ensure Bluetooth is ON and AirBeam is running.")
-
-            address = device.address
-            self.connected_device_name = device.name or "Phone"
-            if not is_background: self.log(f"Found {self.connected_device_name}. Connecting...")
-
-            # Clean up any stale client before connecting
-            await self.disconnect_async()
-            
-            # Connect with refreshed services
-            self.client = BleakClient(address, timeout=15.0, winrt={"use_cached_services": False})
-            await self.client.connect()
-            
-            # Post-connection breathing room for Windows drivers (increased for stability)
-            await asyncio.sleep(2.0)
-            
-            if not is_background: self.log("Finalizing connection...")
-            char = None
-            # Extended polling loop for discovery (15 seconds total)
-            for i in range(150): 
-                try:
-                    # Explicitly refresh services if possible (Bleak doesn't have a direct method, 
-                    # but use_cached_services=False helps)
-                    char = self.client.services.get_characteristic(COMMAND_CHAR_UUID)
-                except: char = None
-                if char: break
-                if not is_background and i % 20 == 0: self.log(f"Still reading services... ({i//10}s)")
-                await asyncio.sleep(0.1)
-
-            if not char:
-                # Comprehensive Diagnostic Log: Show ALL services to identify "Phone Link" interference
-                services_found = [str(s.uuid) for s in self.client.services]
-                self.log(f"Handshake Failed. Found {len(services_found)} services:")
-                for s_uuid in services_found:
-                    self.log(f" -> {s_uuid}")
-                raise Exception("Command service handshake failed.")
-
-            try:
-                await self.client.start_notify(TELEMETRY_CHAR_UUID, self._on_telemetry)
-            except: pass
-            
-            save_config(mac=address)
-            self.log("Linked successfully." if not is_background else f"Auto-Linked: {self.connected_device_name}")
-            
-        except Exception as e:
-            err_msg = str(e)
-            # Check for powered-off radio
-            if "powered off" in err_msg.lower():
-                err_msg = "Laptop Bluetooth is OFF. Please turn it ON."
-            
-            if not is_background:
-                self.log(f"Connection failed: {err_msg}")
-            
-            await self.disconnect_async()
-            raise Exception(err_msg)
 
     def connect(self):
         self.is_manual_disconnect = False
-        future = asyncio.run_coroutine_threadsafe(self._find_and_connect_async(), self.loop)
-        return future.result()
+        return asyncio.run_coroutine_threadsafe(self._connect_serialized(), self.loop).result()
 
-    async def _send_command_async(self, cmd):
-        if not self.client or not self.client.is_connected:
-            await self._find_and_connect_async()
-        await self.client.write_gatt_char(COMMAND_CHAR_UUID, cmd.encode("utf-8"), response=False)
-
-    def send_command(self, cmd):
-        future = asyncio.run_coroutine_threadsafe(self._send_command_async(cmd), self.loop)
-        return future.result()
+    def send_command(self, command):
+        self.is_manual_disconnect = False
+        return asyncio.run_coroutine_threadsafe(self._send_command_async(command), self.loop).result()
 
     def get_rssi(self):
-        future = asyncio.run_coroutine_threadsafe(self._get_rssi_async(), self.loop)
-        return future.result()
+        return asyncio.run_coroutine_threadsafe(self._get_rssi_async(), self.loop).result()
 
     async def disconnect_async(self):
-        if self.client:
-            try: await self.client.disconnect()
-            except: pass
-            self.client = None
+        async with self._connection_lock:
+            await self._disconnect_current_locked()
 
     def disconnect(self):
         self.is_manual_disconnect = True
-        asyncio.run_coroutine_threadsafe(self.disconnect_async(), self.loop)
+        return asyncio.run_coroutine_threadsafe(self.disconnect_async(), self.loop).result()
 
     @property
     def is_connected(self):
